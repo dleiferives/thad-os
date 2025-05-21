@@ -5,6 +5,19 @@ comptime {
     _ = kernel.kmain;
 }
 
+pub const std_options: std.Options = .{
+    // By default, in safe build modes, the standard library will attach a segfault handler to the program to
+    // print a helpful stack trace if a segmentation fault occurs. Here, we can disable this, or even enable
+    // it in unsafe build modes.
+    .enable_segfault_handler = true,
+
+    // This is the logging function used by `std.log`.
+    .logFn = kernel.log,
+    .log_level = .debug,
+    // .page_size_min = 4096, // 4 KiB
+    // .page_size_max = 2 * 1024 * 1024, // 2 MiB
+};
+
 
 // Constants for higher-half kernel
 const KERNEL_PHYS_BASE = 0x100000;            // 1 MiB physical address

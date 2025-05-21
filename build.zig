@@ -65,31 +65,31 @@ pub fn build(b: *std.Build) void {
 
     // Arch
 
-    // const arch = b.addModule("arch", .{
-    //     // TODO @(dleiferives,79feea73-404f-4e2d-b8db-2bba55db6ab3): make this
-    //     // dynamic ~#
-    //     .root_source_file = b.path("src/arch/arch.zig"),
-    //     //.imports = .{}, // TODO
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .link_libc = false,
-    //     .link_libcpp =  false,
-    //     .single_threaded = true,
-    //     .strip = false,
-    //     //.unwind_tables = false, // enable true for smaller package using in development
-    //     //.dwarf_format = .@"64", causes it to crash!
-    //     .code_model = .kernel,
-    //     .stack_protector = false, // panic point on manual management
-    //     .stack_check = false, // ditto
-    //     .sanitize_c = false,
-    //     .sanitize_thread = false,
-    //     .fuzz = false,
-    //     .valgrind = false,
-    //     .pic = false,
-    //     .red_zone = false,
-    //     .omit_frame_pointer = false,
+    const arch = b.addModule("arch", .{
+        // TODO @(dleiferives,79feea73-404f-4e2d-b8db-2bba55db6ab3): make this
+        // dynamic ~#
+        .root_source_file = b.path("src/arch/arch.zig"),
+        //.imports = .{}, // TODO
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+        .link_libcpp =  false,
+        .single_threaded = true,
+        .strip = false,
+        //.unwind_tables = false, // enable true for smaller package using in development
+        //.dwarf_format = .@"64", causes it to crash!
+        .code_model = .kernel,
+        .stack_protector = false, // panic point on manual management
+        .stack_check = false, // ditto
+        .sanitize_c = false,
+        .sanitize_thread = false,
+        .fuzz = false,
+        .valgrind = false,
+        .pic = false,
+        .red_zone = false,
+        .omit_frame_pointer = false,
 
-    // });
+    });
 
 
     // Kernel
@@ -177,11 +177,11 @@ pub fn build(b: *std.Build) void {
 
     kernel.addImport("drivers",drivers);
     // kernel.addImport("core",core);
-    // kernel.addImport("arch",arch);
+    kernel.addImport("arch",arch);
 
     // drivers.addImport("core",core);
-    // drivers.addImport("arch",arch);
-    // drivers.addImport("kernel",kernel);
+    drivers.addImport("arch",arch);
+    drivers.addImport("kernel",kernel);
 
     // arch.addImport("core",core);
     // arch.addImport("kernel",kernel);

@@ -16,12 +16,16 @@ pub const cpu = switch (builtin.cpu.arch) {
     else => @compileError("Unsupported architecture"),
 };
 
-pub const irq = switch (builtin.cpu.arch) {
-    .x86_64 => @import("x86_64/irq.zig"),
-    else => @compileError("Unsupported architecture"),
-};
+// pub const irq = switch (builtin.cpu.arch) {
+//     .x86_64 => @import("x86_64/irq.zig"),
+//     else => @compileError("Unsupported architecture"),
+// };
 
-pub const multiboot = switch (builtin.cpu.arch) {
-    .x86_64 => @import("x86_64/multiboot.zig"),
-    else => @compileError("Unsupported architecture"),
-};
+// pub const multiboot = switch (builtin.cpu.arch) {
+//     .x86_64 => @import("x86_64/multiboot.zig"),
+//     else => @compileError("Unsupported architecture"),
+// };
+
+pub const outb = cpu.outb;
+pub const inb = cpu.inb;
+pub const halt= cpu.halt;

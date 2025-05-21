@@ -3,6 +3,7 @@ const std = @import("std");
 
 /// Writer type for std library integration
 const Writer = std.io.Writer;
+const log = std.log.scoped(.drivers_vga);
 
 /// Screen dimensions
 pub const WIDTH = 80;
@@ -35,7 +36,7 @@ var row: usize = 0;
 var column: usize = 0;
 var fg_color: u4 = @intFromEnum(Color.LIGHT_GRAY);
 var bg_color: u4 = @intFromEnum(Color.BLACK);
-var initialized: bool = false;
+pub var initialized: bool = false;
 
 /// Initialize the VGA driver
 pub fn init(buffer_addr: usize) void {
@@ -154,6 +155,7 @@ pub fn deinit() void {
 }
 
 pub inline fn test_vga() !void {
+    log.info("VGA test started\n", .{});
     try print("{c}\n", .{'a'}); // should be "a"
     try print("{c}\n", .{'Q'}); // should be "Q"
     try print("{c}\n", .{@as(u8,@truncate(256 + '9'))}); // Should be "9"
@@ -172,4 +174,5 @@ pub inline fn test_vga() !void {
     try print("{d}\n", .{std.math.minInt(i64)});
     try print("{d}\n", .{std.math.maxInt(i64)});
     try print("{d}\n", .{std.math.maxInt(u64)});
+    log.info("VGA test completed\n", .{});
 }
