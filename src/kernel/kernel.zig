@@ -1,4 +1,3 @@
-//
 const std = @import("std");
 const drivers = @import("drivers");
 const mem = @import("mem.zig");
@@ -13,7 +12,7 @@ comptime {
     _ = mem.Manager;
 }
 
-pub var log_level: std.log.Level = std.log.Level.info;
+pub var log_level: std.log.Level = std.log.Level.err;
 
 pub export fn kmain() callconv(.C) void {
     main() catch |err| {
@@ -69,6 +68,7 @@ pub const Kernel = struct {
         self.mem_manager= mem.Manager.new();
         self.initilized.mem_layout = true;
         self.multiboot_info_init();
+        self.multiboot_info.dumpInfo(drivers.serial.writer(self.stdio_port)) catch {};
         try self.mem_manager.init(self.multiboot_info);
     }
 
@@ -206,8 +206,7 @@ pub fn logger(
         },
         .warn => {
             if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.warn)) {
-                print("{s}", .{prefix});
-                print(format ++ "\n", args);
+                print(format, args);
             }
         },
         .err => {

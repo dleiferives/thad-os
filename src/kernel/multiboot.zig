@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("mem/types.zig");
+const elf = @import("elf.zig");
 
 pub fn loadInfoHeader(kernel_offset: u64) *InfoHeader {
     var ptr_raw: u64 = undefined;
@@ -569,13 +570,15 @@ pub const FramebufferTag = extern struct {
 /// ELF symbols tag (type 9)
 pub const ElfSymbolsTag = extern struct {
     header: TagHeader,
-    num: u16,
-    entsize: u16,
-    shndx: u16, // Contains index of the section header table entry that contains the section names
-    reserved: u16, // Section headers follow
+    num: u32,
+    entsize: u32,
+    shndx: u32, // Contains index of the section header table entry that contains the section names
+    reserved: u32, // Section headers follow
 
     pub fn print(self: *const ElfSymbolsTag, writer: anytype) !void {
         try writer.print("ELF Symbols:\n  Sections: {}, Entry Size: {}, String Table Index: {}\n", .{ self.num, self.entsize, self.shndx });
+        elf.parseElfSections(self, true);
+
     }
 
     pub fn getSectionCount(self: *const ElfSymbolsTag) usize {
