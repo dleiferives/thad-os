@@ -3,29 +3,48 @@ const std = @import("std");
 const drivers = @import("drivers");
 const mem = @import("mem.zig");
 const log = std.log.scoped(.kernel);
+const multiboot = @import("multiboot.zig");
 
 comptime {
     _ = mem.memset;
     _ = mem.memcpy;
+
+    // early setting the container allocator to be linked to the kernel
+    _ = mem.Manager;
 }
 
 pub var log_level: std.log.Level = std.log.Level.info;
 
 pub export fn kmain() callconv(.C) void {
-    main();
+    main() catch |err| {
+        log.err("Kernel main failed: {}", .{err});
+        panic("Kernel main failed", null, null);
+    };
 }
 
-pub fn main() void {
+pub fn main() !void {
     allowed_scopes = ALL_SCOPES[0..];
+
+    // Load the symbols from the linker!
+    state.multiboot_info_init();
+
     // Initilize the VGA driver
     state.testing.vga = true;
     state.vga_init(0xb8000);
-    // drivers.vga.init(
-    //     mem.types.PhysAddr.new(0xb8000).toVirtual().value,
-    // );
-    // Run vga tests
+
+    // Initialize the serial driver
     state.serial_init(drivers.serial.DEFAULT_BAUDRATE, .COM1);
-    // drivers.serial.init(drivers.serial.DEFAULT_BAUDRATE, .COM1) catch {};
+    state.mem_manager.memory_layout.log();
+
+    // // log.info("Info header {x}",.{@as(u64,@intFromPtr(multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset)))});
+    // log.info("Info header {}",.{multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset)});
+    // var mbi = multiboot.Multiboot2Info.init(multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset));
+    // mbi.dumpInfo(drivers.serial.writer(state.stdio_port)) catch {};
+
+    try state.mem_manager_init();
+    log.info("Kernel loaded", .{});
+
+
 }
 
 pub const Kernel = struct {
@@ -33,19 +52,51 @@ pub const Kernel = struct {
         vga: bool,
 
     },
+    initilized: struct {
+        mem_layout: bool = false,
+        multiboot_info: bool = false,
+        vga: bool = false,
+        serial: bool = false,
+    },
     vga_addr: usize,
     stdio_port: drivers.serial.Port,
     stdio_baudrate: usize,
     stdio_init: bool,
+    mem_manager: mem.Manager,
+    multiboot_info: multiboot.Multiboot2Info,
+
+    pub inline fn mem_manager_init(self: *Kernel) !void {
+        self.mem_manager= mem.Manager.new();
+        self.initilized.mem_layout = true;
+        self.multiboot_info_init();
+        try self.mem_manager.init(self.multiboot_info);
+    }
+
+    /// Initialize the multiboot info
+    /// implicitly called by the memory manager initialization
+    /// as we need to see what memory is available
+    pub inline fn multiboot_info_init(self: *Kernel) void {
+        if (!self.initilized.mem_layout) {
+            log.warn("Multiboot info not initialised, memory layout not set", .{});
+            return;
+        }
+        self.multiboot_info = multiboot.Multiboot2Info.init(multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset));
+        self.initilized.multiboot_info = true;
+    }
 
     pub inline fn vga_init(self: *Kernel, addr: usize) void {
+        if (!self.initilized.mem_layout) {
+            log.warn("VGA driver not initialised, memory layout not set", .{});
+            return;
+        }
         log.debug("Initialising VGA driver at 0x{x}", .{addr});
-        self.vga_addr = mem.types.PhysAddr.new(addr).toVirtual().value;
+        self.vga_addr = addr | self.mem_manager.memory_layout.kernel_offset;
         drivers.vga.init(self.vga_addr);
         if (self.testing.vga) {
             drivers.vga.test_vga() catch {};
         }
         log.info("VGA driver initialised", .{});
+        self.initilized.vga = true;
     }
 
     pub inline fn serial_init(self: *Kernel, baudrate: usize, port: drivers.serial.Port) void {
@@ -55,6 +106,7 @@ pub const Kernel = struct {
         self.stdio_baudrate = baudrate;
         drivers.serial.init(baudrate, port) catch {};
         log.info("Serial driver initialised", .{});
+        self.initilized.serial = true;
     }
 
 };

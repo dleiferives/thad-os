@@ -19,10 +19,10 @@ pub const std_options: std.Options = .{
     // .page_size_max = 2 * 1024 * 1024, // 2 MiB
 };
 
-
-// Constants for higher-half kernel
-const KERNEL_PHYS_BASE = 0x100000;            // 1 MiB physical address
-const KERNEL_VIRT_BASE = 0xFFFFFFFF80000000;  // Higher-half virtual address
+// Using the linker to sneakily move some asm into language code
+// Namely, we're using .bss.stacck to be at the end of the .bss section
+// this will become the stack that the kernel uses
+export var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack") = undefined;
 
 // Basic Multiboot2 header
 comptime {
@@ -58,7 +58,7 @@ comptime {
         \\ cli
         \\
         \\ /* Set up initial stack */
-        \\ movl $(boot_stack_top - 0xFFFFFF8000000000), %esp
+        \\ movl $(KERNEL_VIRTUAL_STACK_END - 0xFFFFFF8000000000), %esp
         \\
         \\ /* Check for multiboot */
         \\ cmpl $0x36d76289, %eax
@@ -156,12 +156,6 @@ comptime {
         \\ multiboot_info_ptr:
         \\ .quad 0
         \\
-        \\ /* Stack space */
-        \\ .section .bss
-        \\ .align 16
-        \\ boot_stack_bottom:
-        \\ .skip 16384  /* 16 KiB */
-        \\ boot_stack_top:
         \\
         \\ /* Global Descriptor Table */
         \\ .section .rodata

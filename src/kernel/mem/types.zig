@@ -8,108 +8,137 @@ pub const PAGE_SIZE: u64 = 4096; // 4 KiB
 /// Address space layout constants
 pub const MEMORY_LAYOUT = struct {
     // Canonical address limitation (48-bit addressing)
+    kernel_offset: u64,
+    kernel_virtual_address_start: u64,
+    kernel_virtual_address_end: u64,
+    kernel_physical_address_start: u64,
+    kernel_physical_address_end: u64,
+    kernel_virtual_stack_start: u64,
+    kernel_virtual_stack_end: u64,
+
     pub const CANONICAL_MASK: u64 = 0xFFFF_0000_0000_0000;
+    pub extern const KERNEL_VIRTUAL_ADDRESS_START: u64;
+    pub extern const KERNEL_VIRTUAL_ADDRESS_END: u64;
+    pub extern const KERNEL_PHYSICAL_ADDRESS_START: u64;
+    pub extern const KERNEL_PHYSICAL_ADDRESS_END: u64;
+    pub extern const KERNEL_VIRTUAL_STACK_START: u64;
+    pub extern const KERNEL_VIRTUAL_STACK_END: u64;
+    pub extern const KERNEL_OFFSET: u64;
 
-    pub const USER_START: u64 = 0x0000_0000_0000_0000;
-    pub const USER_END: u64 = 0x0000_003F_FFFF_FFFF;
-    pub const KERNEL_START: u64 = 0xFFFF_FF80_0000_0000;
-    pub const KERNEL_END: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    pub fn log(self: *MEMORY_LAYOUT) void{
+        std.log.info("Kernel virtual address start: {x}", .{self.kernel_virtual_address_start});
+        std.log.info("Kernel virtual address end: {x}", .{self.kernel_virtual_address_end});
+        std.log.info("Kernel physical address start: {x}", .{self.kernel_physical_address_start});
+        std.log.info("Kernel physical address end: {x}", .{self.kernel_physical_address_end});
+        std.log.info("Kernel virtual stack start: {x}", .{self.kernel_virtual_stack_start});
+        std.log.info("Kernel virtual stack end: {x}", .{self.kernel_virtual_stack_end});
+        std.log.info("Kernel offset: {x}", .{self.kernel_offset});
+    }
 
-    pub const CANNONICAL_MASK: u64 = 0xFFFF_8000_0000_0000; // Canonical address mask for 48-bit addressing
+    pub fn init() MEMORY_LAYOUT {
+        return MEMORY_LAYOUT{
+            .kernel_offset = @intFromPtr(&MEMORY_LAYOUT.KERNEL_OFFSET),
+            .kernel_virtual_address_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_ADDRESS_START),
+            .kernel_virtual_address_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_ADDRESS_END),
+            .kernel_physical_address_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_PHYSICAL_ADDRESS_START),
+            .kernel_physical_address_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_PHYSICAL_ADDRESS_END),
+            .kernel_virtual_stack_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_START),
+            .kernel_virtual_stack_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_END),
+        };
+    }
+
+    pub inline fn rangeFomKernelPhysical(self: *MEMORY_LAYOUT) MemoryRange {
+        return MemoryRange{
+            .start = self.kernel_physical_address_start,
+            .end = self.kernel_physical_address_end,
+        };
+    }
+
+    pub inline fn rangeFomKernelVirtual(self: *MEMORY_LAYOUT) MemoryRange {
+        return MemoryRange{
+            .start = self.kernel_virtual_address_start,
+            .end = self.kernel_virtual_address_end,
+        };
+    }
+
+    pub inline fn rangeFomKernelStack(self: *MEMORY_LAYOUT) MemoryRange {
+        return MemoryRange{
+            .start = self.kernel_virtual_stack_start,
+            .end = self.kernel_virtual_stack_end,
+        };
+    }
 };
 
-/// Physical memory address
-pub const PhysAddr = struct {
-    value: u64,
 
-    pub inline fn new(addr: u64) PhysAddr {
-        return .{ .value = addr};
+/// This structure represents a range of memory.
+/// It is the basis of the memory allocator.
+/// Range -> Map -> Manager -> Allocator
+pub const MemoryRange = struct {
+    start: u64,
+    end: u64,
+
+
+    // self explanitory helper functions
+    pub inline fn get_size(self: MemoryRange) u64 {
+        return self.end - self.start;
     }
-
-    pub inline fn newAligned(addr: u64) PhysAddr {
-        // Assert the address is page-aligned
-        if (addr & (PAGE_SIZE - 1) != 0) {
-            // @panic("PhysAddr must be page-aligned");
+    pub inline fn is_empty(self: MemoryRange) bool {
+        return self.start == self.end;
+    }
+    pub inline fn is_valid(self: MemoryRange) bool {
+        return self.start < self.end;
+    }
+    pub inline fn contains(self: MemoryRange, addr: u64) bool {
+        return addr >= self.start and addr < self.end;
+    }
+    pub inline fn contains_range(self: MemoryRange, other: MemoryRange) bool {
+        return self.start <= other.start and self.end > other.end;
+    }
+    pub inline fn overlaps(self: MemoryRange, other: MemoryRange) bool {
+        return (self.start <= other.start and self.end > other.start)
+            or (self.start >= other.start and self.start < other.end);
+    }
+    pub inline fn disjoint(self: MemoryRange, other: MemoryRange) MemoryRange {
+        if (self.overlaps(other)) {
+            if (self.start < other.start) {
+                return MemoryRange{
+                    .start = self.start,
+                    .end = other.start,
+                };
+            } else if (self.end > other.end) {
+                return MemoryRange{
+                    .start = other.end,
+                    .end = self.end,
+                };
+            }
         }
-        return .{ .value = addr };
-    }
-
-    pub inline fn add(self: *PhysAddr, offset: u64) void {
-        self.value += offset;
-    }
-
-    pub inline fn toVirtual(self: PhysAddr) VirtAddr {
-        // Map to the direct physical mapping region
-        return VirtAddr.new(MEMORY_LAYOUT.KERNEL_START | self.value);
-    }
-
-    pub inline fn fromPointer(ptr: anytype) PhysAddr {
-        return PhysAddr.new(@intFromPtr(ptr));
+        return self;
     }
 };
 
-/// Virtual memory address
-pub const VirtAddr = struct {
-    value: u64,
 
-    pub inline fn new(addr: u64) VirtAddr {
-        // TODO @(dleiferives,0e54c7e7-b126-4d08-afc4-0c8eaa7ac294): Add
-        // cannonical support for virtural addressing, namely that the upper bits
-        // from 47 up have to be the same... ~#
-        if ((addr >> 47) & 0x1 == 1) {
-            if((addr & MEMORY_LAYOUT.CANONICAL_MASK) != MEMORY_LAYOUT.CANONICAL_MASK) {
-                // if(frame_allocator.global_allocator) |_|{
-                    // @panic("VirtAddr must be canonical 0x{x} 0x{x}");
-                    // fa.writer.print("VirtAddr must be canonical 0x{x} 0x{x}", .{addr, addr >> 47 & 0x1}) catch {};
-                // }
-            }
-        } else {
-            if ((addr & MEMORY_LAYOUT.CANONICAL_MASK) != 0) {
-                // if(frame_allocator.global_allocator) |_|{
+pub const MemoryMap = struct {
+    virtual: MemoryRange,
+    physical: ?MemoryRange,
 
-                    // @panic("VirtAddr must be canonical 0x{x} 0x{x}");
-                    // fa.writer.print("VirtAddr must be canonical should start with 0 0x{x} 0x{x}", .{addr, addr >> 47 & 0x1}) catch {};
-                // }
-            }
+    pub inline fn new(virtual: MemoryRange, physical: MemoryRange) MemoryMap {
+        return MemoryMap{
+            .virtual = virtual,
+            .physical = physical,
+        };
+    }
+
+    pub inline fn toPhysical(self: *MemoryMap, addr: u64) ?u64 {
+        if (self.virtual.contains(addr)) {
+            return self.physical.start + (addr - self.virtual.start);
         }
-        return .{ .value = addr };
+        return null;
     }
 
-    pub inline fn newAligned(addr: u64) VirtAddr {
-        if (addr & (PAGE_SIZE - 1) != 0) {
-            // @panic("VirtAddr must be page-aligned");
+    pub inline fn toVirtual(self: *MemoryMap, addr: u64) ?u64 {
+        if (self.physical.contains(addr)) {
+            return self.virtual.start + (addr - self.physical.start);
         }
-        return .{ .value = addr };
-    }
-
-    pub inline fn add(self: *VirtAddr, offset: u64) void {
-        self.value += offset;
-    }
-
-    pub inline fn isNull(self: VirtAddr) bool {
-        return self.value == 0;
-    }
-
-    pub inline fn isCanonical(self: VirtAddr) bool {
-        const bit47 = (self.value >> 47) & 1;
-        const upper_bits = (self.value >> 48) & 0xFFFF;
-        return (bit47 == 1 and upper_bits == 0xFFFF) or
-               (bit47 == 0 and upper_bits == 0);
-    }
-
-    pub inline fn isKernelAddress(self: VirtAddr) bool {
-        return self.value >= MEMORY_LAYOUT.KERNEL_START;
-    }
-
-    pub inline fn isUserAddress(self: VirtAddr) bool {
-        return self.value <= MEMORY_LAYOUT.USER_END;
-    }
-
-    pub inline fn toPhysical(self: VirtAddr) PhysAddr {
-        return PhysAddr.new(self.value - MEMORY_LAYOUT.KERNEL_START);
-    }
-
-    pub inline fn fromPointer(ptr: anytype) VirtAddr {
-        return VirtAddr.new(@intFromPtr(ptr));
+        return null;
     }
 };
