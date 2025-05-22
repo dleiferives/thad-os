@@ -287,7 +287,6 @@ pub const ElfSectionIterator = struct {
 
     /// Get the next section header
     pub fn next(self: *ElfSectionIterator) ?ElfSection {
-        std.log.debug("Current index: {}", .{self.current_index});
         if (self.current_index >= self.tag.num) {
             return null;
         }
@@ -299,8 +298,6 @@ pub const ElfSectionIterator = struct {
             return null;
         }
         const section_ptr = @intFromPtr(self.tag) + section_offset;
-        std.log.debug("Section pointer: 0x{x}", .{section_ptr});
-        std.log.debug("Section offset: 0x{x}", .{section_offset});
 
         var section = ElfSection{
             .header32 = undefined,
@@ -316,46 +313,29 @@ pub const ElfSectionIterator = struct {
         const offset_in_buffer = self.current_index * self.tag.entsize;
         const single_header_size = @sizeOf(elf.Elf64_Shdr);
         const section_header_bytes_from_buffer = buffer[offset_in_buffer .. offset_in_buffer + single_header_size];
-        for (section_header_bytes_from_buffer) |byte| {
-            std.log.warn("{X:0>2}", .{byte});
+        // for (section_header_bytes_from_buffer) |byte| {
+        //     std.log.warn("{X:0>2}", .{byte});
 
-        }
-        std.log.warn("eeek\n",.{});
-        const u32_slice = std.mem.bytesAsSlice(u32, section_header_bytes_from_buffer);
-        for (u32_slice) |s| {
-            const little = std.mem.littleToNative(u32,s);
-            std.log.warn("{X:0>8} {X:0>8}\n",.{little, s});
-        }
+        // }
+        // std.log.warn("eeek\n",.{});
+        // const u32_slice = std.mem.bytesAsSlice(u32, section_header_bytes_from_buffer);
+        // for (u32_slice) |s| {
+        //     const little = std.mem.littleToNative(u32,s);
+        //     std.log.warn("{X:0>8} {X:0>8}\n",.{little, s});
+        // }
 
         if (self.is_64bit) {
             section.header64 = std.mem.bytesAsValue(elf.Elf64_Shdr, section_header_bytes_from_buffer).*;
-            std.log.debug("Section Name 64-bit: 0x{X:0>8}", .{section.header64.sh_name});
-            std.log.debug("Section Type 64-bit: 0x{X:0>8}", .{section.header64.sh_type});
-            std.log.debug("Section Flags 64-bit: 0x{X:0>16}", .{section.header64.sh_flags});
-            std.log.debug("Section Address 64-bit: 0x{X:0>16}", .{section.header64.sh_addr});
-            std.log.debug("Section Offset 64-bit: 0x{X:0>16}", .{section.header64.sh_offset});
-            std.log.debug("Section Size 64-bit: 0x{X:0>16}", .{section.header64.sh_size});
-            std.log.debug("Section Link 64-bit: 0x{X:0>8}", .{section.header64.sh_link});
-            std.log.debug("Section Info 64-bit: 0x{X:0>8}", .{section.header64.sh_info});
-            std.log.debug("Section Addralign 64-bit: 0x{X:0>16}", .{section.header64.sh_addralign});
-            std.log.debug("Section Entsize 64-bit: 0x{X:0>16}", .{section.header64.sh_entsize});
-            littleToNativeInPlace(section_header_bytes_from_buffer);
-
-            for (section_header_bytes_from_buffer) |byte| {
-                std.log.warn("{X:0>2}", .{byte});
-
-            }
-            // section.header64 = std.mem.bytesAsValue(elf.Elf64_Shdr, new).*;
-            std.log.debug("Section Name 64-bit: 0x{X:0>8}", .{section.header64.sh_name});
-            std.log.debug("Section Type 64-bit: 0x{X:0>8}", .{section.header64.sh_type});
-            std.log.debug("Section Flags 64-bit: 0x{X:0>16}", .{section.header64.sh_flags});
-            std.log.debug("Section Address 64-bit: 0x{X:0>16}", .{section.header64.sh_addr});
-            std.log.debug("Section Offset 64-bit: 0x{X:0>16}", .{section.header64.sh_offset});
-            std.log.debug("Section Size 64-bit: 0x{X:0>16}", .{section.header64.sh_size});
-            std.log.debug("Section Link 64-bit: 0x{X:0>8}", .{section.header64.sh_link});
-            std.log.debug("Section Info 64-bit: 0x{X:0>8}", .{section.header64.sh_info});
-            std.log.debug("Section Addralign 64-bit: 0x{X:0>16}", .{section.header64.sh_addralign});
-            std.log.debug("Section Entsize 64-bit: 0x{X:0>16}", .{section.header64.sh_entsize});
+            // std.log.debug("Section Name 64-bit: 0x{X:0>8}", .{section.header64.sh_name});
+            // std.log.debug("Section Type 64-bit: 0x{X:0>8}", .{section.header64.sh_type});
+            // std.log.debug("Section Flags 64-bit: 0x{X:0>16}", .{section.header64.sh_flags});
+            // std.log.debug("Section Address 64-bit: 0x{X:0>16}", .{section.header64.sh_addr});
+            // std.log.debug("Section Offset 64-bit: 0x{X:0>16}", .{section.header64.sh_offset});
+            // std.log.debug("Section Size 64-bit: 0x{X:0>16}", .{section.header64.sh_size});
+            // std.log.debug("Section Link 64-bit: 0x{X:0>8}", .{section.header64.sh_link});
+            // std.log.debug("Section Info 64-bit: 0x{X:0>8}", .{section.header64.sh_info});
+            // std.log.debug("Section Addralign 64-bit: 0x{X:0>16}", .{section.header64.sh_addralign});
+            // std.log.debug("Section Entsize 64-bit: 0x{X:0>16}", .{section.header64.sh_entsize});
             if (self.string_table_data != null) {
                 section.name = section.getName();
             }
@@ -474,11 +454,13 @@ pub const ElfSection = struct {
 pub fn parseElfSections(tag: *const ElfSymbolsTag, is_64bit: bool) void {
     // Create the iterator
     var section_iterator = ElfSectionIterator.init(tag, is_64bit);
+    var string_data: []const u8 = undefined;
 
     // First, find the string table to resolve section names
     if (section_iterator.findStringTableSection()) |string_section| {
         if (string_section.getData()) |string_table| {
             section_iterator.setStringTable(string_table);
+            string_data = string_table;
         }
     }
 
@@ -488,13 +470,16 @@ pub fn parseElfSections(tag: *const ElfSymbolsTag, is_64bit: bool) void {
     std.log.debug("Section Headers (total: {}):\n", .{tag.num});
     std.log.debug("  [Nr] Name                Type           Address          Offset    Size     Flags\n", .{});
 
-    var flags_buffer: [8]u8 = [_]u8{' '} ** 8;
+    // var flags_buffer: [8]u8 = [_]u8{' '} ** 8;
 
+    section_iterator = ElfSectionIterator.init(tag, is_64bit);
     var i: usize = 0;
+    _ = section_iterator.next();
     while (section_iterator.next()) |section| : (i += 1) {
         const name = section.name orelse "[unknown]";
         const type_str = section.getTypeString();
-        const flags_str = section.getFlagsString(&flags_buffer);
+        // const flags_str = section.getFlagsString(&flags_buffer);
+        const flags_str = "aa";
 
         if (is_64bit) {
             std.log.debug("  [{:2}] {s:<20} {s:<15} {X:0>16} {X:0>8} {X:0>8} {s}\n",

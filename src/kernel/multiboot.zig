@@ -577,8 +577,7 @@ pub const ElfSymbolsTag = extern struct {
 
     pub fn print(self: *const ElfSymbolsTag, writer: anytype) !void {
         try writer.print("ELF Symbols:\n  Sections: {}, Entry Size: {}, String Table Index: {}\n", .{ self.num, self.entsize, self.shndx });
-        elf.parseElfSections(self, true);
-
+        // elf.parseElfSections(self, true);
     }
 
     pub fn getSectionCount(self: *const ElfSymbolsTag) usize {
