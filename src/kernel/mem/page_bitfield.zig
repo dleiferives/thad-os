@@ -1,0 +1,216 @@
+const std = @import("std");
+const types = @import("types.zig");
+
+pub const PageBitFieldError = error {
+    OutOfMemory,
+    InvalidRange,
+    AddressNotAligned,
+    AddressNotInField,
+};
+// a bitfeild that stores pages.
+// to initilize it, we pass in an allocator,
+// the ranges of available memory
+// uses u64 for the bitfield.
+// this will be used for page allocation!
+pub const PageBitField = struct {
+    allocator: std.mem.Allocator,
+    ranges: []types.MemoryRange,
+    bit_ranges: []BitRange,
+    bitfield: []u64,
+    pages: u64,
+
+    pub fn init(allocator: std.mem.Allocator, ranges: []types.MemoryRange) !PageBitField {
+        std.log.info("Initializing PageBitField", .{});
+        var self = PageBitField{
+            .allocator = allocator,
+            .ranges = ranges,
+            .bitfield = undefined,
+            .bit_ranges = undefined,
+            .pages = 0,
+        };
+
+        var pages: u64 = 0;
+        var bit_ranges = std.ArrayList(BitRange).init(self.allocator);
+        for (ranges) |range| {
+            const start = std.mem.alignForward(u64, range.start, 4096) / 4096;
+            const end = std.mem.alignBackward(u64, range.end - 1, 4096) / 4096;
+            // as we align forward and backward, this means if end == start we have 1 page!
+            pages += end - start + 1;
+            const bit_range = BitRange{
+                .start = self.pages,
+                .end = pages,
+            };
+            try bit_ranges.append(bit_range);
+            self.pages = pages;
+        }
+        self.bit_ranges = bit_ranges.items;
+
+        self.bitfield = try allocator.alloc(u64, (pages + 63) / 64);
+        // This is going to round up the number of entries that we need in our bitfield.
+        // Therefore we need to set the ending bits as allocated at the end of the bitfield.
+        // If they do not fit nicely into an entry
+        const final_entry_mask = ~((@as(u64, 1) << (@as(u6,@truncate(pages)) & 0x3F)) - 1);
+
+        for(0..self.bitfield.len) |i| {
+            self.bitfield[i] = 0;
+        }
+        if (self.bitfield.len > 0){
+            self.bitfield[self.bitfield.len - 1] = final_entry_mask;
+        }
+
+        return self;
+    }
+
+    // COPY and Paste from the reserveRanges function
+    pub fn reserveRange(self: *PageBitField, range: types.MemoryRange) !void {
+        // Figure out our starting addresses
+        const start = std.mem.alignForward(u64, range.start, 4096);
+        const end = std.mem.alignBackward(u64, range.end - 1, 4096);
+        if (end < start) {
+            return PageBitFieldError.InvalidRange;
+        }
+        var iter = start;
+        // we're going to skip a page at at ime
+        while (iter <= end) : (iter += 4096) {
+            // get the data we need
+            const bit_id = try self.getBitId(iter);
+            if (bit_id.index >= self.bitfield.len) {
+                return PageBitFieldError.OutOfMemory;
+            }
+            // set the bit in the bitfield
+            self.bitfield[bit_id.index] |= 1 << bit_id.bit;
+        }
+    }
+
+    /// Reserves a range of pages in the bitfield.
+    pub fn reserveRanges(self: *PageBitField, range: []types.MemoryRange) !void {
+        // For each range, we need to reserve the pages
+        for (range) |r| {
+            // This starts with us figuring out the start and end pages are
+
+            const start = std.mem.alignForward(u64, r.start, 4096);
+            const end = std.mem.alignBackward(u64, r.end - 1, 4096);
+            if (end < start) {
+                continue;
+                // return PageBitFieldError.InvalidRange;
+            }
+            // we're then going to iterate through each page
+            // as they may lie across multiple ranges
+            var iter = start;
+            while (iter <= end) : (iter += 4096) {
+                // then we're going to get the bit id
+                const bit_id = self.getBitId(iter) catch {
+                    // Range may not be in the space
+                    // therefore we may have an error
+                    // as such we're just going to continue
+                    continue;
+
+                } orelse continue;
+
+                if (bit_id.index >= self.bitfield.len) {
+                    return PageBitFieldError.OutOfMemory;
+                }
+                // and set the bit in the bitfield
+                const mask: u64 = @as(u64,1) << @as(u6,@truncate(bit_id.bit));
+                self.bitfield[bit_id.index] |= mask;
+            }
+        }
+    }
+
+    /// Returns the bit id of the page at the given address.
+    pub fn getBitId(self: PageBitField, address: u64) !?BitRef {
+        if (address % 4096 != 0) {
+            return PageBitFieldError.AddressNotAligned;
+        }
+        for (self.bit_ranges,0..) |bit_range,range_idx| {
+            if (self.ranges[range_idx].contains(address)) {
+                const range_bit_offset: u64 = ((address / 4096) - std.mem.alignForward(u64, self.ranges[range_idx].start, 4096)) / 4096;
+                const bit_offset = range_bit_offset + bit_range.start;
+                const bit_id = BitRef{
+                    .index = (bit_offset) >> 6,
+                    .bit = bit_offset & 0x3F,
+                };
+                return bit_id;
+            }
+        }
+        return null;
+    }
+
+    /// Returns the number of pages in the bitfield.
+    pub fn getFreePages(self: *PageBitField) u64 {
+        var free_pages: u64 = 0;
+        for (self.bitfield) |bit| {
+            free_pages += @popCount(bit);
+        }
+        return self.pages - free_pages;
+    }
+
+    /// Returns the number of reserved pages in the bitfield.
+    pub fn getReserved(self: *PageBitField) u64 {
+        var reserved_pages: u64 = 0;
+        for (self.bitfield) |bit| {
+            reserved_pages += @popCount(bit);
+        }
+        return reserved_pages;
+    }
+
+    // Gets the page address from the page id.
+    pub fn pageFromId(self: *PageBitField, id: u64) ?u64 {
+        if (id >= self.pages) {
+            return null;
+        }
+        for (self.bit_ranges,0..) |bit_range,range_idx| {
+            if (!bit_range.contains(id)) continue;
+            const address = self.ranges[range_idx].start + ((id - bit_range.start) * 4096);
+            return address;
+        }
+        return null;
+
+    }
+
+    /// Allocates a page from the bitfield.
+    /// Returns the address of the page.
+    /// If no pages are available, returns null.
+    pub fn allocatePage(self: *PageBitField) ?u64 {
+        for (self.bitfield,0..) |entry, index| {
+            if (entry != 0xFFFFFFFFFFFFFFFF) {
+                // find the first bit that is not set
+                // we are goig to flip the entry
+                // then count the number of traling zeros
+                // This means that we're always going to allocate from the end forward.
+                const bit_offset = @ctz(~entry);
+                const page_id = (index << 6) + bit_offset;
+                return self.pageFromId(page_id);
+            }
+        }
+        return null;
+    }
+
+    /// Frees a page from the bitfield.
+    pub fn freePage(self: *PageBitField, address: u64) !void {
+        if (try self.getBitId(address)) |bit_id| {
+            if (bit_id.index >= self.bitfield.len) {
+                return PageBitFieldError.PageNotInField;
+            }
+            // clear the bit in the bitfield
+            const mask: u64 = @as(u64,1) << @as(u6,@truncate(bit_id.bit));
+            self.bitfield[bit_id.index] &= ~mask;
+            return;
+        }
+        return PageBitFieldError.AddressNotInField;
+    }
+};
+
+pub const BitRef = struct {
+    index: u64,
+    bit: u64,
+};
+
+pub const BitRange = struct {
+    start: u64,
+    end: u64,
+
+    pub inline fn contains(self: BitRange, address: u64) bool {
+        return address >= self.start and address < self.end;
+    }
+};
