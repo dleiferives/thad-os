@@ -2,6 +2,7 @@
 const std = @import("std");
 const drivers = @import("drivers");
 const mem = @import("mem.zig");
+const log = std.log.scoped(.kernel);
 
 comptime {
     _ = mem.memset;
@@ -15,45 +16,45 @@ pub export fn kmain() callconv(.C) void {
 }
 
 pub fn main() void {
-    // Set up the scopes for logging
     allowed_scopes = ALL_SCOPES[0..];
-
-    // TODO @(dleiferives,847f8ee2-2c93-44f4-a27d-d7d865c23d1d): Support
-    // dynamically finding the vga address from the multiboot header ~#
     // Initilize the VGA driver
+    state.testing.vga = true;
+    state.vga_init(0xb8000);
+    // drivers.vga.init(
+    //     mem.types.PhysAddr.new(0xb8000).toVirtual().value,
+    // );
     // Run vga tests
-    // state.testing.vga = true;
-    state.init_vga(0xb8000);
-
-    // state.init_serial(.COM1) catch |err| {
-    //     print("Error initializing serial port: {}\n", .{err});
-    // };
-
-    std.log.info("VGA and serial port initialized\n", .{});
-
+    state.serial_init(drivers.serial.DEFAULT_BAUDRATE, .COM1);
+    // drivers.serial.init(drivers.serial.DEFAULT_BAUDRATE, .COM1) catch {};
 }
 
 pub const Kernel = struct {
-    testing: struct{
+    testing: struct {
         vga: bool,
-        serial: bool,
+
     },
     vga_addr: usize,
     stdio_port: drivers.serial.Port,
-    /// must set before calling init_serial
-    stdio_baud: u32 = drivers.serial.DEFAULT_BAUDRATE,
+    stdio_baudrate: usize,
+    stdio_init: bool,
 
-    pub inline fn init_vga(self: *Kernel, addr: usize) void {
+    pub inline fn vga_init(self: *Kernel, addr: usize) void {
+        log.debug("Initialising VGA driver at 0x{x}", .{addr});
         self.vga_addr = mem.types.PhysAddr.new(addr).toVirtual().value;
         drivers.vga.init(self.vga_addr);
-        if(self.testing.vga) {
-                drivers.vga.test_vga() catch {};
+        if (self.testing.vga) {
+            drivers.vga.test_vga() catch {};
         }
+        log.info("VGA driver initialised", .{});
     }
 
-    pub inline fn init_serial(self: *Kernel, port: drivers.serial.Port) !void {
+    pub inline fn serial_init(self: *Kernel, baudrate: usize, port: drivers.serial.Port) void {
+        log.debug("Initialising serial driver {} with baudrate {d}", .{port, baudrate});
+        self.stdio_init = true;
         self.stdio_port = port;
-        try drivers.serial.init(self.stdio_baud, port);
+        self.stdio_baudrate = baudrate;
+        drivers.serial.init(baudrate, port) catch {};
+        log.info("Serial driver initialised", .{});
     }
 
 };
@@ -87,16 +88,18 @@ pub fn print(comptime format: []const u8, args: anytype) void {
     if (drivers.vga.initialized) {
         drivers.vga.print(format, args) catch {};
     }
-    if (drivers.serial.isInitialised(state.stdio_port)) {
-        drivers.serial.print(state.stdio_port, format, args) catch {};
-
-    }
+    if (state.stdio_init) {
+        if (drivers.serial.isInitialised(state.stdio_port)) {
+                drivers.serial.print(state.stdio_port, format, args) catch {};
+        }
+   }
 }
 
 pub const LogScope = enum {
     drivers_vga,
     drivers_serial,
     arch_gdt,
+    kernel,
     kernel_main,
     std_log_default_scope,
 };
@@ -105,12 +108,13 @@ pub var allowed_scopes: ?[]const LogScope = null;
 pub const ALL_SCOPES = [_]LogScope{
     .drivers_vga,
     .drivers_serial,
+    .kernel,
     .arch_gdt,
     .kernel_main,
     .std_log_default_scope,
 };
 
-pub fn log(
+pub fn logger(
     comptime level: std.log.Level,
     comptime scope: @Type(.enum_literal),
     comptime format: []const u8,
@@ -119,45 +123,45 @@ pub fn log(
     // Ignore all non-error logging from sources other than
     // .my_project, .nice_library and the default
 
-    // if (!std.mem.eql(u8, @tagName(scope), @tagName(.default))) {
-    //     if (allowed_scopes) |allowed| {
-    //         var found = false;
-    //         for (allowed) |allowed_scope| {
-    //             if (std.mem.eql(u8, @tagName(scope), @tagName(allowed_scope))) {
-    //                 found = true;
-    //                 break;
-    //             }
-    //         }
-    //         if (!found) {
-    //             return;
-    //         }
-    //     }
-    // }
+    if (!std.mem.eql(u8, @tagName(scope), @tagName(.default))) {
+        if (allowed_scopes) |allowed| {
+            var found = false;
+            for (allowed) |allowed_scope| {
+                if (std.mem.eql(u8, @tagName(scope), @tagName(allowed_scope))) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                return;
+            }
+        }
+    }
     const scope_prefix = if (scope == .default) ": " else " (" ++ @tagName(scope) ++ "): ";
     const prefix = "[" ++ comptime level.asText() ++ "]" ++ scope_prefix;
     switch (level) {
         .debug => {
             if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.debug)) {
                 print("{s}", .{prefix});
-                print(format, args);
+                print(format ++ "\n", args);
             }
         },
         .info => {
             if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.info)) {
                 print("{s}", .{prefix});
-                print(format, args);
+                print(format ++ "\n", args);
             }
         },
         .warn => {
             if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.warn)) {
                 print("{s}", .{prefix});
-                print(format, args);
+                print(format ++ "\n", args);
             }
         },
         .err => {
             if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.err)) {
                 print("{s}", .{prefix});
-                print(format, args);
+                print(format ++ "\n", args);
             }
         },
     }

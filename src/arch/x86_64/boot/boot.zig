@@ -3,6 +3,7 @@ const arch = @import("arch");
 const kernel = @import("kernel");
 comptime {
     _ = kernel.kmain;
+    _ = kernel.panic;
 }
 
 pub const std_options: std.Options = .{
@@ -12,7 +13,7 @@ pub const std_options: std.Options = .{
     .enable_segfault_handler = true,
 
     // This is the logging function used by `std.log`.
-    .logFn = kernel.log,
+    .logFn = kernel.logger,
     .log_level = .debug,
     // .page_size_min = 4096, // 4 KiB
     // .page_size_max = 2 * 1024 * 1024, // 2 MiB
