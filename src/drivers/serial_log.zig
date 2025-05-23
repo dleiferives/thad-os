@@ -3,7 +3,7 @@
 const std = @import("std");
 const Writer = std.io.Writer;
 const arch = @import("arch");
-const log = std.log.scoped(.drivers_serial);
+const log = std.log.scoped(.drivers_serial_log);
 
 /// The I/O port numbers associated with each serial port
 pub const Port = enum(u16) {

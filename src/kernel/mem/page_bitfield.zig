@@ -1,5 +1,8 @@
 const std = @import("std");
+
 const types = @import("types.zig");
+const log = std.log.scoped(.mem_page_bitfield);
+const verbose_log = std.log.scoped(.mem_page_bitfield_verbose);
 
 pub const PageBitFieldError = error {
     OutOfMemory,
@@ -20,7 +23,7 @@ pub const PageBitField = struct {
     pages: u64,
 
     pub fn init(allocator: std.mem.Allocator, ranges: []types.MemoryRange) !PageBitField {
-        std.log.info("Initializing PageBitField", .{});
+        log.info("Initializing", .{});
         var self = PageBitField{
             .allocator = allocator,
             .ranges = ranges,
@@ -34,8 +37,14 @@ pub const PageBitField = struct {
         for (ranges) |range| {
             const start = std.mem.alignForward(u64, range.start, 4096) / 4096;
             const end = std.mem.alignBackward(u64, range.end - 1, 4096) / 4096;
+            verbose_log.info("Proccessing range: 0x{X:0>16} - 0x{X:0>16}", .{start * 4096, end * 4096});
+            if(start > end){
+                verbose_log.info("Range is not large enough, skipping", .{});
+                continue;
+            }
             // as we align forward and backward, this means if end == start we have 1 page!
             pages += end - start + 1;
+            verbose_log.info("Yeilding {} pages", .{pages});
             const bit_range = BitRange{
                 .start = self.pages,
                 .end = pages,
@@ -58,6 +67,7 @@ pub const PageBitField = struct {
             self.bitfield[self.bitfield.len - 1] = final_entry_mask;
         }
 
+        log.info("Initialized with Pages: {}", .{self.pages});
         return self;
     }
 

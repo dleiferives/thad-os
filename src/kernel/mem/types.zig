@@ -2,6 +2,8 @@
 const std = @import("std");
 // const frame_allocator = @import("frame_allocator.zig");
 
+const layout_log = std.log.scoped(.mem_layout);
+
 // const PAGE_SIZE = frame_allocator.PAGE_SIZE;
 pub const PAGE_SIZE: u64 = 4096; // 4 KiB
 
@@ -25,18 +27,19 @@ pub const MEMORY_LAYOUT = struct {
     pub extern const KERNEL_VIRTUAL_STACK_END: u64;
     pub extern const KERNEL_OFFSET: u64;
 
-    pub fn log(self: *MEMORY_LAYOUT) void{
-        std.log.info("Kernel virtual address start: {x}", .{self.kernel_virtual_address_start});
-        std.log.info("Kernel virtual address end: {x}", .{self.kernel_virtual_address_end});
-        std.log.info("Kernel physical address start: {x}", .{self.kernel_physical_address_start});
-        std.log.info("Kernel physical address end: {x}", .{self.kernel_physical_address_end});
-        std.log.info("Kernel virtual stack start: {x}", .{self.kernel_virtual_stack_start});
-        std.log.info("Kernel virtual stack end: {x}", .{self.kernel_virtual_stack_end});
-        std.log.info("Kernel offset: {x}", .{self.kernel_offset});
+    pub fn log(self: *const MEMORY_LAYOUT) void{
+        layout_log.info("Kernel virtual address start: {x}", .{self.kernel_virtual_address_start});
+        layout_log.info("Kernel virtual address end: {x}", .{self.kernel_virtual_address_end});
+        layout_log.info("Kernel physical address start: {x}", .{self.kernel_physical_address_start});
+        layout_log.info("Kernel physical address end: {x}", .{self.kernel_physical_address_end});
+        layout_log.info("Kernel virtual stack start: {x}", .{self.kernel_virtual_stack_start});
+        layout_log.info("Kernel virtual stack end: {x}", .{self.kernel_virtual_stack_end});
+        layout_log.info("Kernel offset: {x}", .{self.kernel_offset});
     }
 
     pub fn init() MEMORY_LAYOUT {
-        return MEMORY_LAYOUT{
+        layout_log.info("Initializing memory layout", .{});
+        const result = MEMORY_LAYOUT{
             .kernel_offset = @intFromPtr(&MEMORY_LAYOUT.KERNEL_OFFSET),
             .kernel_virtual_address_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_ADDRESS_START),
             .kernel_virtual_address_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_ADDRESS_END),
@@ -45,6 +48,8 @@ pub const MEMORY_LAYOUT = struct {
             .kernel_virtual_stack_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_START),
             .kernel_virtual_stack_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_END),
         };
+        result.log();
+        return result;
     }
 
     pub inline fn rangeFomKernelPhysical(self: *MEMORY_LAYOUT) MemoryRange {
@@ -100,12 +105,12 @@ pub const MemoryRange = struct {
     }
     pub inline fn disjoint(self: MemoryRange, other: MemoryRange) MemoryRange {
         if (self.overlaps(other)) {
-            if (self.start < other.start) {
+            if (self.start <= other.start) {
                 return MemoryRange{
                     .start = self.start,
                     .end = other.start,
                 };
-            } else if (self.end > other.end) {
+            } else if (self.end >= other.end) {
                 return MemoryRange{
                     .start = other.end,
                     .end = self.end,
@@ -114,6 +119,34 @@ pub const MemoryRange = struct {
         }
         return self;
     }
+
+    // Subtracts 'other' from 'self'. Returns up to two disjoint ranges.
+    // Result is stored in a small array to avoid allocation.
+    pub fn subtract(self: MemoryRange, other: MemoryRange) [2]MemoryRange {
+        var result: [2]MemoryRange = .{ .{.start=0,.end=0}, .{.start=0,.end=0} };
+        var count: usize = 0;
+
+        if (!self.overlaps(other)) {
+            result[count] = self;
+            count += 1;
+            return result;
+        }
+
+        // Part of self before other
+        if (self.start < other.start) {
+            result[count] = .{ .start = self.start, .end = @min(self.end, other.start) };
+            if (result[count].is_valid()) count += 1;
+        }
+
+        // Part of self after other
+        if (self.end > other.end) {
+            result[count] = .{ .start = @max(self.start, other.end), .end = self.end };
+            if (result[count].is_valid()) count += 1;
+        }
+        return result;
+    }
+
+
 };
 
 

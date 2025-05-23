@@ -1,2 +1,2 @@
 pub const vga = @import("vga.zig");
-pub const serial = @import("serial.zig");
+pub const serial_log = @import("serial_log.zig");

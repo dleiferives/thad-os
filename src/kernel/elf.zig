@@ -1,5 +1,6 @@
 const std = @import("std");
 const multiboot = @import("multiboot.zig");
+const types = @import("mem/types.zig");
 const mem = std.mem;
 const ElfSymbolsTag = multiboot.ElfSymbolsTag;
 
@@ -447,6 +448,24 @@ pub const ElfSection = struct {
         pos += 1;
 
         return buffer[0..pos];
+    }
+
+    pub fn toMemoryMap(self: ElfSection) types.MemoryMap {
+        const addr = if (self.is_64bit) self.header64.sh_addr else self.header32.sh_addr;
+        const size = if (self.is_64bit) self.header64.sh_size else self.header32.sh_size;
+        const offset = if (self.is_64bit) self.header64.sh_offset else self.header32.sh_offset;
+
+        return types.MemoryMap{
+            .virtual = types.MemoryRange{
+                .start = addr,
+                .end = addr + size,
+            },
+            .physical =  types.MemoryRange{
+                .start = offset,
+                .end = offset + size,
+            },
+        };
+
     }
 };
 

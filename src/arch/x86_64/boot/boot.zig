@@ -27,7 +27,6 @@ export var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack") = und
 // Basic Multiboot2 header
 comptime {
     asm (
-        \\ /* Convert from Intel syntax to AT&T syntax for LLVM */
         \\ .set MBOOT2_MAGIC, 0xE85250D6
         \\ .set MBOOT2_ARCH, 0
         \\ .set MBOOT2_LENGTH, (Multiboot2HeaderEnd - Multiboot2Header)
@@ -47,7 +46,6 @@ comptime {
         \\ Multiboot2HeaderEnd:
         \\
         \\
-        \\ /* boot.S */
         \\ .att_syntax prefix
         \\ .code32
         \\

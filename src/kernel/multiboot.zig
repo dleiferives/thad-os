@@ -583,6 +583,10 @@ pub const ElfSymbolsTag = extern struct {
     pub fn getSectionCount(self: *const ElfSymbolsTag) usize {
         return @divExact(self.header.size - @sizeOf(ElfSymbolsTag), self.entsize);
     }
+
+    pub fn fromTagHeader(header: *const TagHeader) *const ElfSymbolsTag {
+        return @ptrCast(header);
+    }
 };
 
 

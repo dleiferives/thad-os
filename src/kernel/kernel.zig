@@ -1,8 +1,9 @@
 const std = @import("std");
 const drivers = @import("drivers");
 const mem = @import("mem.zig");
-const log = std.log.scoped(.kernel);
 const multiboot = @import("multiboot.zig");
+
+const log = std.log.scoped(.kernel);
 
 comptime {
     _ = mem.memset;
@@ -24,16 +25,12 @@ pub export fn kmain() callconv(.C) void {
 pub fn main() !void {
     allowed_scopes = ALL_SCOPES[0..];
 
-    // Load the symbols from the linker!
-    state.multiboot_info_init();
-
     // Initilize the VGA driver
     state.testing.vga = true;
     state.vga_init(0xb8000);
 
     // Initialize the serial driver
-    state.serial_init(drivers.serial.DEFAULT_BAUDRATE, .COM1);
-    state.mem_manager.memory_layout.log();
+    state.serial_log_init(drivers.serial_log.DEFAULT_BAUDRATE, .COM1);
 
     // // log.info("Info header {x}",.{@as(u64,@intFromPtr(multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset)))});
     // log.info("Info header {}",.{multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset)});
@@ -55,10 +52,10 @@ pub const Kernel = struct {
         mem_layout: bool = false,
         multiboot_info: bool = false,
         vga: bool = false,
-        serial: bool = false,
+        serial_log: bool = false,
     },
     vga_addr: usize,
-    stdio_port: drivers.serial.Port,
+    stdio_port: drivers.serial_log.Port,
     stdio_baudrate: usize,
     stdio_init: bool,
     mem_manager: mem.Manager,
@@ -68,7 +65,7 @@ pub const Kernel = struct {
         self.mem_manager= mem.Manager.new();
         self.initilized.mem_layout = true;
         self.multiboot_info_init();
-        self.multiboot_info.dumpInfo(drivers.serial.writer(self.stdio_port)) catch {};
+        self.multiboot_info.dumpInfo(drivers.serial_log.writer(self.stdio_port)) catch {};
         try self.mem_manager.init(self.multiboot_info);
     }
 
@@ -99,14 +96,14 @@ pub const Kernel = struct {
         self.initilized.vga = true;
     }
 
-    pub inline fn serial_init(self: *Kernel, baudrate: usize, port: drivers.serial.Port) void {
+    pub inline fn serial_log_init(self: *Kernel, baudrate: usize, port: drivers.serial_log.Port) void {
         log.debug("Initialising serial driver {} with baudrate {d}", .{port, baudrate});
         self.stdio_init = true;
         self.stdio_port = port;
         self.stdio_baudrate = baudrate;
-        drivers.serial.init(baudrate, port) catch {};
+        drivers.serial_log.init(baudrate, port) catch {};
         log.info("Serial driver initialised", .{});
-        self.initilized.serial = true;
+        self.initilized.serial_log = true;
     }
 
 };
@@ -141,25 +138,39 @@ pub fn print(comptime format: []const u8, args: anytype) void {
         drivers.vga.print(format, args) catch {};
     }
     if (state.stdio_init) {
-        if (drivers.serial.isInitialised(state.stdio_port)) {
-                drivers.serial.print(state.stdio_port, format, args) catch {};
+        if (drivers.serial_log.isInitialised(state.stdio_port)) {
+                drivers.serial_log.print(state.stdio_port, format, args) catch {};
         }
    }
 }
 
 pub const LogScope = enum {
     drivers_vga,
-    drivers_serial,
+    drivers_serial_log,
     arch_gdt,
     kernel,
     kernel_main,
+    mem,
+    mem_verbose,
+    mem_layout,
+    mem_manager,
+    mem_manager_verbose,
+    mem_page_bitfield,
+    mem_page_bitfield_verbose,
     std_log_default_scope,
 };
 
 pub var allowed_scopes: ?[]const LogScope = null;
 pub const ALL_SCOPES = [_]LogScope{
+    .mem_page_bitfield_verbose,
+    .mem_page_bitfield,
+    .mem,
+    .mem_verbose,
+    .mem_layout,
+    .mem_manager,
+    .mem_manager_verbose,
     .drivers_vga,
-    .drivers_serial,
+    .drivers_serial_log,
     .kernel,
     .arch_gdt,
     .kernel_main,
@@ -189,8 +200,9 @@ pub fn logger(
             }
         }
     }
-    const scope_prefix = if (scope == .default) ": " else " (" ++ @tagName(scope) ++ "): ";
-    const prefix = "[" ++ comptime level.asText() ++ "]" ++ scope_prefix;
+    const prefix_scope = "[" ++ @tagName(scope) ++ "]: ";
+    const prefix_level = "[" ++ comptime level.asText() ++ "]: ";
+    const prefix = if(scope == .default) prefix_level else prefix_scope;
     switch (level) {
         .debug => {
             if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.debug)) {
