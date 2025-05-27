@@ -1,13 +1,11 @@
 const std = @import("std");
 const kernel= @import("kernel");
-const gdt = @import("gdt.zig");
 const pf_log = std.log.scoped(.irq_page_fault);
 
 // ============================================================================
 // Core Types and Enums
 // ============================================================================
 
-extern var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack");
 pub const Vector = enum(u8) {
     // CPU Exceptions
     divide_error = 0,
@@ -65,18 +63,22 @@ pub const Vector = enum(u8) {
     }
 };
 
+// Update InterruptFrame to match x86_64 layout
 pub const InterruptFrame = extern struct {
-    // General purpose registers (pushed by stub)
-    rax: u64, rbx: u64, rcx: u64, rdx: u64,
-    rsi: u64, rdi: u64, rbp: u64, rsp_saved: u64,
-    r8: u64, r9: u64, r10: u64, r11: u64,
-    r12: u64, r13: u64, r14: u64, r15: u64,
+    // Segment registers (pushed by our stub)
+    gs: u64, fs: u64, es: u64, ds: u64,
 
-    // Interrupt info (pushed by stub)
+    // General purpose registers (pushed by our stub)
+    r15: u64, r14: u64, r13: u64, r12: u64,
+    r11: u64, r10: u64, r9: u64, r8: u64,
+    rbp: u64, rdi: u64, rsi: u64, rdx: u64,
+    rcx: u64, rbx: u64, rax: u64,
+
+    // Interrupt info (pushed by our stub)
     vector: u64,
     error_code: u64,
 
-    // CPU-pushed values
+    // CPU-pushed values (pushed by CPU during interrupt)
     rip: u64,
     cs: u64,
     rflags: u64,
@@ -126,11 +128,9 @@ pub const idt = struct {
     var idtr: Idtr = undefined;
 
     pub fn init() void {
-        // Clear table
         std.log.info("Initializing IDT...", .{});
         @memset(std.mem.asBytes(&table), 0);
 
-        // Set up IDTR
         idtr = .{
             .limit = @sizeOf(@TypeOf(table)) - 1,
             .base = @intFromPtr(&table),
@@ -165,7 +165,7 @@ pub const idt = struct {
 };
 
 // ============================================================================
-// Hardware Controllers
+// Hardware Controllers (keep your existing PIC code)
 // ============================================================================
 
 const ControllerError = error{ InvalidIrq, Timeout, HardwareError };
@@ -272,7 +272,7 @@ pub const dispatcher = struct {
     }
 
     // Called from assembly stub
-    export fn dispatch(frame: *InterruptFrame) callconv(.C) void {
+    export fn interrupt_dispatcher(frame: *InterruptFrame) callconv(.C) void {
         const vector_n = Vector.fromValue(@intCast(frame.vector));
         if (vector_n == null) {
             std.log.err("Invalid interrupt vector: {d}", .{frame.vector});
@@ -305,10 +305,7 @@ pub const dispatcher = struct {
     }
 };
 
-// ============================================================================
-// Exception Handlers
-// ============================================================================
-
+// Keep your existing exception handlers but update the function signature
 pub const exceptions = struct {
     fn formatException(comptime name: []const u8, frame: *InterruptFrame) void {
         std.log.err("EXCEPTION: {s}", .{name});
@@ -318,7 +315,9 @@ pub const exceptions = struct {
         std.log.err("  RCX: 0x{X:0>16} RDX: 0x{X:0>16}", .{ frame.rcx, frame.rdx });
     }
 
+
     fn pageFault(frame: *InterruptFrame) void {
+        asm volatile ("cli");
         const fault_addr = asm volatile ("mov %%cr2, %[result]"
             : [result] "=r" (-> u64)
         );
@@ -326,13 +325,10 @@ pub const exceptions = struct {
         const present = (frame.error_code & 1) != 0;
         const write = (frame.error_code & 2) != 0;
         const user = (frame.error_code & 4) != 0;
-        const rsp = asm volatile("mov %%rsp, %%rax" : [_] "={rax}" (-> usize));
-        const stack_ptr = asm volatile("movabsq $kernel_stack, %%rax" : [_] "={rax}" (-> usize));
-
-        std.log.err("RSP {} {}",.{rsp, @intFromPtr(&gdt.kernel_stack_gdt)});
-        std.log.err("RSP {} {}",.{rsp, stack_ptr});
-        std.log.err("diff 0x{X:0>16}",.{@intFromPtr(&gdt.kernel_stack_gdt) - rsp});
-
+        var rsp = asm volatile ("mov %%rsp, %[result]"
+            : [result] "=r" (-> u64)
+        );
+        std.log.err("RSP : 0x{X:0>16}", .{rsp});
 
         pf_log.err("Page Fault at address: 0x{X:0>16}", .{fault_addr});
         pf_log.err("  RIP: 0x{X:0>16}", .{frame.rip});
@@ -343,10 +339,8 @@ pub const exceptions = struct {
             if (user) "user" else "kernel",
         });
 
-        // Try to handle demand paging first
+        // Keep your existing page fault handling logic...
         if (!present) {
-            // Get the current mapper from the memory manager
-            // You'll need to expose this from your kernel state
             const kernel_state = kernel.state;
             if (kernel_state.initilized.mem_manager) {
                 if (kernel_state.mem_manager.mapper) |*mapper_ptr| {
@@ -355,12 +349,18 @@ pub const exceptions = struct {
                     if (mapper.handleDemandPageFault(fault_addr)) |success| {
                         if (success) {
                             pf_log.info("Successfully handled demand page fault at 0x{X:0>16}", .{fault_addr});
-                            // var t: [*]u64 = @ptrFromInt(fault_addr);
-                            // t[0] = 0; // Example operation to ensure the page is mapped
                             pf_log.info("Continuing execution after handling page fault", .{});
+
+                            rsp = asm volatile ("mov %%rsp, %[result]"
+                                : [result] "=r" (-> u64)
+                            );
+                            std.log.err("RSP : 0x{X:0>16}", .{rsp});
+                            asm volatile ("sti");
                             return; // Successfully handled, continue execution
                         } else {
                             pf_log.err("Failed to handle demand page fault at 0x{X:0>16}", .{fault_addr});
+                            while(true){}
+                            asm volatile ("sti");
                             return;
                         }
                     } else |err| {
@@ -370,9 +370,6 @@ pub const exceptions = struct {
             }
         }
 
-
-        // If we get here, it's an unhandled page fault
-        // formatException("Page Fault", frame);
         pf_log.err("  Fault Address: 0x{X:0>16}", .{fault_addr});
         pf_log.err("UNHANDLED PAGE FAULT - System halted",.{});
         asm volatile ("cli; hlt");
@@ -389,13 +386,10 @@ pub const exceptions = struct {
         asm volatile ("cli; hlt");
     }
 
-    // Generic handler for non-critical exceptions
     fn genericException(comptime name: []const u8) HandlerFn {
         return struct {
             fn handler(frame: *InterruptFrame) void {
                 formatException(name, frame);
-                // For non-critical exceptions, we could potentially continue
-                // but for safety, we'll halt for now
                 asm volatile ("cli; hlt");
             }
         }.handler;
@@ -425,27 +419,19 @@ pub const exceptions = struct {
     }
 };
 
-// ============================================================================
-// Main IRQ Interface
-// ============================================================================
-
+// Keep your existing irq interface but update the main init function
 pub const irq = struct {
     var current_controller: Controller = pic.controller;
 
     pub fn init() !void {
-        // Initialize IDT
         std.log.info("Initializing IRQ system...",.{});
         idt.init();
         disable();
         idt.setupStubs();
 
-        // Initialize controller
         try current_controller.init();
-
-        // Register exception handlers
         exceptions.init();
 
-        // Load IDT
         idt.load();
         enable();
 

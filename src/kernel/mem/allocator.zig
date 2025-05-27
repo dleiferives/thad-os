@@ -133,7 +133,7 @@ pub const FreeListAllocator = struct {
 
         // map the first page
         log.info("Initializing FreeListAllocator at {x} with size {d}", .{ start, initial_size });
-        const demand_state = try allocator_er.mapper.mapDemandRange(allocator_er.start, allocator_er.end, allocator_er.flags);
+        const demand_state = try allocator_er.mapper.mapDemandRange(allocator_er.start, initial_size, allocator_er.flags);
         if (!demand_state) {
             // we have a demand state, so we need to initialize the headers
             @panic("we have to hanlde cleanup of the demand state");
@@ -301,7 +301,11 @@ pub const FreeListAllocator = struct {
 
             log_verbose.info("allocated range is 0x{X:0>16} -> 0x{X:0>16}",.{range.start, range.end});
             self.last_allocation_len = len;
-            return @ptrFromInt(range.start);
+            const res: [*]u8 = @ptrFromInt(range.start);
+            for(0..len) |i| {
+                res[i] = 0;
+            }
+            return res;
         } else {
             log.info("We do not have enough space!",.{});
             // + Not enough space we ask for more

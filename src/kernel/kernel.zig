@@ -46,7 +46,7 @@ pub fn main() !void {
     // mbi.dumpInfo(drivers.serial.writer(state.stdio_port)) catch {};
 
     try state.mem_manager_init();
-    try arch.cpu.gdt.tester();
+    // try arch.cpu.gdt.tester();
 
     // var ps2_ctrl = try drivers.ps2.Ps2Controller.init();
     // log.info("--- PS/2 Controller Initialized ---\n", .{});
@@ -75,38 +75,40 @@ pub fn main() !void {
     //     }
     // }
 
+    try testDemandPaging();
     // Initialize kernel heap
-    try state.initKernelHeap();
+    // try state.initKernelHeap();
 
-    // Now you can use the allocator
-    if (state.getKernelAllocator()) |alloc| {
-    //     // Test allocation
-        const test_data = try alloc.alloc(u8, 1024 * 1024);
-        log.info("Allocated 1MB of memory at {x}", .{@intFromPtr(test_data.ptr)});
-    //     // defer alloc.free(test_data);
 
-    //     // for (test_data) |*byte| {
-    //     //     log.info("Allocating byte at {x}", .{@intFromPtr(byte)});
-    //     //     byte.* = 0x42; // Fill with a test pattern
-    //     // }
-    //     // log.info("Successfully allocated and used {} bytes", .{test_data.len});
+    // // Now you can use the allocator
+    // if (state.getKernelAllocator()) |alloc| {
+    // //     // Test allocation
+    //     const test_data = try alloc.alloc(u8, 1024 * 1024);
+    //     // log.info("Allocated 1MB of memory at {x}", .{@intFromPtr(test_data.ptr)});
+    //     defer alloc.free(test_data);
 
-    }
+    // //     // for (test_data) |*byte| {
+    // //     //     log.info("Allocating byte at {x}", .{@intFromPtr(byte)});
+    // //     //     byte.* = 0x42; // Fill with a test pattern
+    // //     // }
+    // //     // log.info("Successfully allocated and used {} bytes", .{test_data.len});
+
+    // }
 
 
     // Initialize UART
-    try drivers.uart.init(.{
-        .port = .COM1,
-        .baud_rate = .B115200,
-        .enable_interrupts = true,
-    });
+    // try drivers.uart.init(.{
+    //     .port = .COM1,
+    //     .baud_rate = .B115200,
+    //     .enable_interrupts = true,
+    // });
 
     // Enable interrupts
 
     log.info("Kernel loaded", .{});
 
     // Simple output
-    try drivers.uart.print("Hello, World!\n",.{});
+    // try drivers.uart.print("Hello, World!\n",.{});
     // try drivers.uart.print("Enter commands (type 'help' for list):\n",.{});
 
     // var input_buffer: [128]u8 = undefined;
@@ -235,17 +237,18 @@ pub const Kernel = struct {
 
         // Create kernel heap in virtual address space
         const heap_start = mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_HEAP_START;
+        _ = heap_start;
         const heap_size = 64 * 1024 * 1024; // 64MB heap
 
         self.kernel_heap = try mem.allocator.FreeListAllocator.init(
-            heap_start,
+            0xFFFFFF8010000000,
             heap_size,
             mapper,
             mem.PageFlags{
-                .present = false,
+                .present = true,
                 .writable = true,
                 .user_accessible = false,
-                .demand_alloc = true, // Not demand paging for kernel heap
+                .demand_alloc = false, // Not demand paging for kernel heap
             },
         );
 
@@ -438,7 +441,7 @@ pub fn testDemandPaging() !void {
 
     // Allocate some virtual memory with demand paging
     const test_virt_addr: u64 = 0xFFFFFF8010000000; // Some unused virtual address
-    const test_size: u64 = 4 * mem.PAGE_SIZE_4K; // 4 pages
+    const test_size: u64 = 1024 * mem.PAGE_SIZE_4K; // 4 pages
 
     const flags = mem.PageFlags{
         .present = false, // Will be set by demand handler
@@ -462,14 +465,17 @@ pub fn testDemandPaging() !void {
     }
 
     // Access second page
-    const test_ptr2: *volatile u64 = @ptrFromInt(test_virt_addr + mem.PAGE_SIZE_4K);
-    test_ptr2.* = 0xCAFEBABE;
+    for(1..1023) |i|{
+        const test_ptr2: *volatile u64 = @ptrFromInt(test_virt_addr + mem.PAGE_SIZE_4K * i);
+        test_ptr2.* = 0xCAFEBABE;
+        log.info("Accessing second page at 0x{X:0>16} {}", .{@intFromPtr(test_ptr2), i});
 
-    if (test_ptr2.* == 0xCAFEBABE) {
-        log.info("Second page access successful!", .{});
-    } else {
-        log.err("Second page access failed!", .{});
-        return error.DemandPagingTestFailed;
+        if (test_ptr2.* == 0xCAFEBABE) {
+        } else {
+            log.err("Second page access failed!", .{});
+            return error.DemandPagingTestFailed;
+        }
+
     }
 
     log.info("Demand paging test completed successfully!", .{});

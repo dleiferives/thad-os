@@ -721,14 +721,14 @@ pub const Mapper = struct {
     const Self = @This();
 
     /// Gets a virtual pointer to a physical page table.
-    fn getTableVirtPtr(phys_addr: u64, kernel_offset: u64, comptime T: type) *volatile T {
+    inline fn getTableVirtPtr(phys_addr: u64, kernel_offset: u64, comptime T: type) *volatile T {
         // std.debug.assert(phys_addr & PAGE_MASK_4K == 0); // Must be page aligned
         const virt_ptr_val = phys_addr + kernel_offset;
         return @ptrFromInt(virt_ptr_val);
     }
 
     /// Allocates a new, zeroed page table frame.
-    fn allocate_page_table_frame(self: *Self) MapperError!u64 {
+    inline fn allocate_page_table_frame(self: *Self) MapperError!u64 {
         mapper_log.debug("Allocating frame", .{});
         const frame_phys_addr = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
 
@@ -889,17 +889,18 @@ pub const Mapper = struct {
                 virt_addr, pte_ptr.* & PTE_ADDR_MASK, phys_addr,
             });
         }
+
         mapper_verbose_log.info("mapped (allocated) virt 0x{X:0>16} -> 0x{X:0>16}",.{virt_addr,phys_addr});
         pte_ptr.* = phys_addr | page_flags.to_bits();
         invlpg(virt_addr);
     }
 
-    pub fn mapDemandRange(
+    pub fn mapRange(
         self: *Self,
         start_virt_addr: u64,
         end_virt_addr: u64,
         page_flags: PageFlags,
-    ) !bool {
+    ) !void {
         if (start_virt_addr & PAGE_MASK_4K != 0 or end_virt_addr & PAGE_MASK_4K != 0) {
             mapper_log.err("mapDemandRange: start_virt_addr 0x{x} or end_virt_addr 0x{x} not 4K aligned.", .{start_virt_addr, end_virt_addr});
             return MapperError.AddressNotAligned;
@@ -908,7 +909,7 @@ pub const Mapper = struct {
 
         if (start_virt_addr >= end_virt_addr) {
             mapper_log.err("mapDemandRange: start address 0x{x} is not less than end address 0x{x}.", .{start_virt_addr, end_virt_addr});
-            return false; // No range to map
+            return; // No range to map
         }
 
         // check if the range is already mapped
@@ -925,10 +926,33 @@ pub const Mapper = struct {
 
         current_virt = start_virt_addr;
         while (current_virt <= end_virt_addr) {
-            try self.mapDemand(current_virt, page_flags);
+            // allocate a page
+            const phys_addr = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
+            try self.map(current_virt,phys_addr, page_flags);
             current_virt += PAGE_SIZE_4K;
         }
-        return true; // Successfully mapped the range
+        return; // Successfully mapped the range
+
+    }
+
+    pub fn mapDemandRange(
+        self: *Self,
+        virt_addr: u64,
+        size: u64,
+        page_flags: PageFlags,
+    ) !bool {
+
+        const page_count = (size + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
+        var current_addr = virt_addr & ~PAGE_MASK_4K;
+
+        var i: u64 = 0;
+        while (i < page_count) : (i += 1) {
+            try self.mapDemand(current_addr, page_flags);
+            current_addr += PAGE_SIZE_4K;
+        }
+
+        log.info("Allocated {} pages with demand paging at 0x{X:0>16}", .{ page_count, virt_addr });
+        return true;
     }
 
     /// Maps a virtual page with demand allocation - no physical frame allocated initially
@@ -1004,16 +1028,20 @@ pub const Mapper = struct {
         mapper_log.debug("allocatePageForFault: Allocating page for fault at virt_addr 0x{x}", .{virt_addr});
         const phys_addr = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
 
+        const rsp = asm volatile ("mov %%rsp, %[result]"
+            : [result] "=r" (-> u64)
+        );
+        std.log.err("RSP : 0x{X:0>16}", .{rsp});
         // Zero the allocated page
-        // const page_virt_ptr = getTableVirtPtr(phys_addr, self.kernel_offset, [PAGE_SIZE_4K]u8);
-        // @memset(page_virt_ptr, 0);
+        const page_virt_ptr = getTableVirtPtr(phys_addr, self.kernel_offset, [PAGE_SIZE_4K]u8);
+        @memset(page_virt_ptr, 0);
 
         mapper_verbose_log.debug("Allocated page frame 0x{x} for fault at virt 0x{x}", .{ phys_addr, virt_addr });
         return phys_addr;
     }
 
     /// Handle demand page allocation in page fault
-    pub fn handleDemandPageFault(self: *Self, virt_addr: u64) MapperError!bool {
+    pub inline fn handleDemandPageFault(self: *Self, virt_addr: u64) MapperError!bool {
         const page_aligned_virt = virt_addr & ~PAGE_MASK_4K;
 
         const pml4_idx = pml4Index(page_aligned_virt);
@@ -1053,8 +1081,6 @@ pub const Mapper = struct {
 
         // PageFlags.from_bits(pte_val).log();
 
-
-
         // Check if this is a demand allocation page
         if ((pte_val & PT_DEMAND_ALLOC) == 0) {
             return false; // Not a demand page
@@ -1085,7 +1111,6 @@ pub const Mapper = struct {
 
         mapper_verbose_log.info("Demand allocated: virt 0x{X:0>16} -> phys 0x{X:0>16}",
                        .{ page_aligned_virt, phys_addr });
-
 
         invlpg(page_aligned_virt);
         invlpg(@intFromPtr(pt_virt));

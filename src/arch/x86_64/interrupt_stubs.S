@@ -1,116 +1,144 @@
-section .text
+.section .text
 
-; Macro to create interrupt stub with error code
-; num is the first argument
-%macro ISR_ERROR_CODE 1
-    global isr_ %+ %1
-    ; type isr_%1, @function ; NASM usually infers this
-isr_ %+ %1:
-    ; Error code already pushed by CPU
-    push %1                     ; Push interrupt number
-    jmp interrupt_common
-%endmacro
+// Common interrupt handler that saves all registers
+.global interrupt_common_stub
+interrupt_common_stub:
+    // Save all general purpose registers
+    push %rax
+    push %rbx
+    push %rcx
+    push %rdx
+    push %rsi
+    push %rdi
+    push %rbp
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
 
-; Macro to create interrupt stub without error code
-; num is the first argument
-%macro ISR_NO_ERROR_CODE 1
-    global isr_ %+ %1
-    ; type isr_%1, @function ; NASM usually infers this
-isr_ %+ %1:
-    push 0                      ; Push dummy error code
-    push %1                     ; Push interrupt number
-    jmp interrupt_common
-%endmacro
+    // Save segment registers (though they're mostly unused in 64-bit)
+    mov %ds, %rax
+    push %rax
+    mov %es, %rax
+    push %rax
+    mov %fs, %rax
+    push %rax
+    mov %gs, %rax
+    push %rax
 
-; Declare dispatch as an external function
-extern dispatch
+    // Load kernel data segment
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
 
-; Generate all 256 interrupt stubs
-ISR_NO_ERROR_CODE 0     ; Divide Error
-ISR_NO_ERROR_CODE 1     ; Debug
-ISR_NO_ERROR_CODE 2     ; NMI
-ISR_NO_ERROR_CODE 3     ; Breakpoint
-ISR_NO_ERROR_CODE 4     ; Overflow
-ISR_NO_ERROR_CODE 5     ; Bound Range
-ISR_NO_ERROR_CODE 6     ; Invalid Opcode
-ISR_NO_ERROR_CODE 7     ; Device Not Available
-ISR_ERROR_CODE    8     ; Double Fault
-ISR_NO_ERROR_CODE 9     ; Reserved
-ISR_ERROR_CODE    10    ; Invalid TSS
-ISR_ERROR_CODE    11    ; Segment Not Present
-ISR_ERROR_CODE    12    ; Stack Segment Fault
-ISR_ERROR_CODE    13    ; General Protection
-ISR_ERROR_CODE    14    ; Page Fault
-ISR_NO_ERROR_CODE 15    ; Reserved
-ISR_NO_ERROR_CODE 16    ; x87 FPU Error
-ISR_ERROR_CODE    17    ; Alignment Check
-ISR_NO_ERROR_CODE 18    ; Machine Check
-ISR_NO_ERROR_CODE 19    ; SIMD FPU Error
-ISR_NO_ERROR_CODE 20    ; Virtualization
-ISR_ERROR_CODE    21    ; Control Protection
+    // Call the C interrupt handler with RSP as argument
+    mov %rsp, %rdi
+    call interrupt_dispatcher
 
-; Generate remaining stubs (22-255)
-%assign i 22
-%rep 234
-    ISR_NO_ERROR_CODE i
-    %assign i i + 1
-%endrep
+    // Restore segment registers
+    pop %rax
+    mov %rax, %gs
+    pop %rax
+    mov %rax, %fs
+    pop %rax
+    mov %rax, %es
+    pop %rax
+    mov %rax, %ds
 
-; Common interrupt handler
-interrupt_common:
-    ; Save all registers
-    push rax
-    push rbx
-    push rcx
-    push rdx
-    push rsi
-    push rdi
-    push rbp
-    push rsp ; Saves the stack pointer value before pushing r8-r15
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
+    // Restore general purpose registers
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rbp
+    pop %rdi
+    pop %rsi
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    pop %rax
 
-    ; Call Zig dispatcher
-    mov rdi, rsp      ; Pass interrupt frame (pointer to saved registers) as first argument
-    call dispatch
+    // Remove error code and vector number from stack
+    add $16, %rsp
 
-    ; Restore all registers
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rsp ; Restores rsp to its value before r8-r15 were pushed
-    pop rbp
-    pop rdi
-    pop rsi
-    pop rdx
-    pop rcx
-    pop rbx
-    pop rax
-
-    ; Remove error code and interrupt number from the stack (2 * 8 bytes)
-    add rsp, 16
-
-    ; Return from interrupt
+    // Return from interrupt
     iretq
 
-; Create stub address table
-section .rodata
-global interrupt_stubs
-; type interrupt_stubs, @object ; NASM infers this
+// Generate interrupt stubs
+.macro ISR_NOERRCODE num
+.global isr\num
+isr\num:
+    cli
+    pushq $0        // Push dummy error code
+    pushq $\num     // Push vector number
+    jmp interrupt_common_stub
+.endm
+
+.macro ISR_ERRCODE num
+.global isr\num
+isr\num:
+    cli
+    pushq $\num     // Push vector number (error code already pushed by CPU)
+    jmp interrupt_common_stub
+.endm
+
+// Generate all interrupt stubs
+ISR_NOERRCODE 0
+ISR_NOERRCODE 1
+ISR_NOERRCODE 2
+ISR_NOERRCODE 3
+ISR_NOERRCODE 4
+ISR_NOERRCODE 5
+ISR_NOERRCODE 6
+ISR_NOERRCODE 7
+ISR_ERRCODE   8
+ISR_NOERRCODE 9
+ISR_ERRCODE   10
+ISR_ERRCODE   11
+ISR_ERRCODE   12
+ISR_ERRCODE   13
+ISR_ERRCODE   14
+ISR_NOERRCODE 15
+ISR_NOERRCODE 16
+ISR_ERRCODE   17
+ISR_NOERRCODE 18
+ISR_NOERRCODE 19
+ISR_NOERRCODE 20
+ISR_ERRCODE   21
+ISR_NOERRCODE 22
+ISR_NOERRCODE 23
+ISR_NOERRCODE 24
+ISR_NOERRCODE 25
+ISR_NOERRCODE 26
+ISR_NOERRCODE 27
+ISR_NOERRCODE 28
+ISR_NOERRCODE 29
+ISR_NOERRCODE 30
+ISR_NOERRCODE 31
+
+// IRQ stubs (32-47)
+.irp num,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+ISR_NOERRCODE \num
+.endr
+
+// Additional interrupts (48-255)
+.irp num,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
+ISR_NOERRCODE \num
+.endr
+
+// Create interrupt stub table
+.section .rodata
+.global interrupt_stubs
+.align 8
 interrupt_stubs:
-%assign i 0
-%rep 256
-    dq isr_ %+ i ; Define a 64-bit pointer to the ISR handler
-    %assign i i + 1
-%endrep
+.irp num,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
+.quad isr\num
+.endr

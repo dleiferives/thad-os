@@ -191,7 +191,7 @@ var tss: TaskStateSegment align(16) = undefined;
 var gdt_ptr: GdtPointer = undefined;
 
 /// Kernel stack for ring 0 operations
-pub var kernel_stack_gdt: [0x10000]u8 align(16) = undefined; // 16KB kernel stack
+pub var kernel_stack_gdt: [0x4000]u8 align(16) = undefined; // 16KB kernel stack
 
 /// Flag to track initialization
 var initialized: bool = false;
