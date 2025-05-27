@@ -191,9 +191,7 @@ var tss: TaskStateSegment align(16) = undefined;
 var gdt_ptr: GdtPointer = undefined;
 
 /// Kernel stack for ring 0 operations
-var kernel_stack: [0x4000]u8 align(16) = undefined; // 16KB kernel stack
-var double_fault_stack: [0x1000]u8 align(16) = undefined; // 4KB DF stack
-var page_fault_stack: [0x10000]u8 align(16) = undefined;   // 4KB PF stack
+pub var kernel_stack_gdt: [0x10000]u8 align(16) = undefined; // 16KB kernel stack
 
 /// Flag to track initialization
 var initialized: bool = false;
@@ -246,14 +244,8 @@ pub fn init() void {
     // @memcpy(std.mem.asBytes(&entries[5])[0..16], tss_bytes);
 
     // Set up kernel stack in TSS
-    const kernel_stack_top = @intFromPtr(&kernel_stack) + kernel_stack.len;
+    const kernel_stack_top = @intFromPtr(&kernel_stack_gdt) + kernel_stack_gdt.len;
     tss.rsp0 = kernel_stack_top;
-
-
-    const df_stack_top = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
-    const pf_stack_top = @intFromPtr(&page_fault_stack) + page_fault_stack.len;
-    setInterruptStack(1, df_stack_top); // Assuming IST1 for Double Fault
-    setInterruptStack(2, pf_stack_top); // Assuming IST2 for Page Fault
 
     // Set up GDT pointer
     gdt_ptr = GdtPointer{

@@ -213,7 +213,7 @@ pub const Manager = struct {
             // TODO @(dleiferives,fd0a8391-a09e-413c-83f1-43d17b535c6f): Remove
             // the hacky solution to gettig the kernel to load properly by just
             // loading an additional meg ontop! ~#
-            if (current_phys > self.memory_layout.kernel_physical_address_end + (8 * 1024 * 1024)) {
+            if (current_phys > self.memory_layout.kernel_physical_address_end + (12 * 1024 * 1024)) {
                 if (self.page_bitfield.largestFreePage()) |largest_page| {
                     if (current_phys > largest_page) {
                         manager_log.err("Physical address 0x{x} is larger than largest free page 0x{x}", .{current_phys, largest_page});

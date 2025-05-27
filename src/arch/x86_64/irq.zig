@@ -1,5 +1,6 @@
 const std = @import("std");
 const kernel= @import("kernel");
+const gdt = @import("gdt.zig");
 const pf_log = std.log.scoped(.irq_page_fault);
 
 // ============================================================================
@@ -64,23 +65,22 @@ pub const Vector = enum(u8) {
 };
 
 pub const InterruptFrame = extern struct {
-    // GPRs pushed by stub (last to first)
-    r15: u64, r14: u64, r13: u64, r12: u64,
-    r11: u64, r10: u64, r9: u64,  r8: u64,
-    rsp_saved: u64, // The RSP value that was pushed
-    rbp: u64, rdi: u64, rsi: u64, rdx: u64,
-    rcx: u64, rbx: u64, rax: u64,
+    // General purpose registers (pushed by stub)
+    rax: u64, rbx: u64, rcx: u64, rdx: u64,
+    rsi: u64, rdi: u64, rbp: u64, rsp_saved: u64,
+    r8: u64, r9: u64, r10: u64, r11: u64,
+    r12: u64, r13: u64, r14: u64, r15: u64,
 
-    // Pushed by stub before GPRs
-    vector_num: u64, // Renamed to avoid confusion with Vector enum type
-    error_code_val: u64, // Renamed
+    // Interrupt info (pushed by stub)
+    vector: u64,
+    error_code: u64,
 
-    // CPU-pushed interrupt frame
+    // CPU-pushed values
     rip: u64,
     cs: u64,
     rflags: u64,
-    rsp_at_interrupt: u64,
-    ss_at_interrupt: u64,
+    rsp: u64,
+    ss: u64,
 };
 
 pub const HandlerFn = *const fn (frame: *InterruptFrame) void;
@@ -103,11 +103,11 @@ pub const idt = struct {
         offset_high: u32,
         reserved1: u32 = 0,
 
-        fn init(handler: u64, dpl: u2, ist_index: u3) Gate {
+        fn init(handler: u64, dpl: u2) Gate {
             return .{
                 .offset_low = @truncate(handler),
                 .selector = 0x08, // Kernel code segment
-                .ist = ist_index,
+                .ist = 0,
                 .dpl = dpl,
                 .present = 1,
                 .offset_mid = @truncate(handler >> 16),
@@ -136,11 +136,11 @@ pub const idt = struct {
         };
     }
 
-    pub fn setGate(vector: Vector, handler: u64, dpl: u2, ist_index: u3) void {
+    pub fn setGate(vector: Vector, handler: u64, dpl: u2) void {
         std.log.info("Setting IDT gate for vector {d} at handler 0x{X:0>16} with DPL {d}", .{
             vector.toValue(), handler, dpl,
         });
-        table[vector.toValue()] = Gate.init(handler, dpl,ist_index);
+        table[vector.toValue()] = Gate.init(handler, dpl);
         std.log.info("Gate set for vector {d}", .{vector.toValue()});
     }
 
@@ -157,13 +157,7 @@ pub const idt = struct {
             const vector = Vector.fromValue(@intCast(i));
             if (vector == null) continue;
             const dpl: u2 = if (vector.? == .syscall or vector.? == .breakpoint) 3 else 0;
-            if (vector.? == .double_fault) {
-                setGate(vector.?, interrupt_stubs[i], 0, 1); // IST 1 for DF
-            } else if (vector.? == .page_fault) {
-                setGate(vector.?, interrupt_stubs[i], 0, 2); // IST 2 for PF (example)
-            } else {
-                setGate(vector.?, interrupt_stubs[i], dpl, 0); // No IST
-            }
+            setGate(vector.?, interrupt_stubs[i], dpl);
         }
         std.log.info("Interrupt stubs set up for all vectors", .{});
     }
@@ -277,17 +271,16 @@ pub const dispatcher = struct {
     }
 
     // Called from assembly stub
-    export fn dispatch(frame: *InterruptFrame) void {
-        const frame_l = frame.*; // Dereference once
-        const vector_n = Vector.fromValue(@intCast(frame_l.vector_num));
+    export fn dispatch(frame: *InterruptFrame) callconv(.C) void {
+        const vector_n = Vector.fromValue(@intCast(frame.vector));
         if (vector_n == null) {
-            std.log.err("Invalid interrupt vector: {d}", .{frame_l.vector_num});
-            defaultHandler(frame); // Pass pointer
+            std.log.err("Invalid interrupt vector: {d}", .{frame.vector});
+            defaultHandler(frame);
             return;
         }
         const vector = vector_n.?;
 
-        if (handlers[vector.toValue()]) |handler| {
+        if (handlers[frame.vector]) |handler| {
             handler(frame);
         } else {
             defaultHandler(frame);
@@ -300,10 +293,10 @@ pub const dispatcher = struct {
     }
 
     fn defaultHandler(frame: *InterruptFrame) void {
-        const vector = Vector.fromValue(@intCast(frame.vector_num));
-        std.log.err("Unhandled interrupt: {any} ({any})", .{ vector, frame.vector_num });
+        const vector = Vector.fromValue(@intCast(frame.vector));
+        std.log.err("Unhandled interrupt: {any} ({any})", .{ vector, frame.vector });
 
-        if (frame.vector_num < 32) {
+        if (frame.vector < 32) {
             // CPU exception - halt system
             std.log.err("CPU Exception at RIP: 0x{X}", .{frame.rip});
             asm volatile ("cli; hlt");
@@ -319,7 +312,7 @@ pub const exceptions = struct {
     fn formatException(comptime name: []const u8, frame: *InterruptFrame) void {
         std.log.err("EXCEPTION: {s}", .{name});
         std.log.err("  RIP: 0x{X:0>16}", .{frame.rip});
-        std.log.err("  Error Code: 0x{X:0>16}", .{frame.error_code_val});
+        std.log.err("  Error Code: 0x{X:0>16}", .{frame.error_code});
         std.log.err("  RAX: 0x{X:0>16} RBX: 0x{X:0>16}", .{ frame.rax, frame.rbx });
         std.log.err("  RCX: 0x{X:0>16} RDX: 0x{X:0>16}", .{ frame.rcx, frame.rdx });
     }
@@ -329,13 +322,17 @@ pub const exceptions = struct {
             : [result] "=r" (-> u64)
         );
 
-        const present = (frame.error_code_val & 1) != 0;
-        const write = (frame.error_code_val & 2) != 0;
-        const user = (frame.error_code_val & 4) != 0;
+        const present = (frame.error_code & 1) != 0;
+        const write = (frame.error_code & 2) != 0;
+        const user = (frame.error_code & 4) != 0;
+        const rsp = asm volatile("mov %%rsp, %%rax" : [_] "={rax}" (-> usize));
+        std.log.err("RSP {} {}",.{rsp, @intFromPtr(&gdt.kernel_stack_gdt)});
+        std.log.err("diff 0x{X:0>16}",.{@intFromPtr(&gdt.kernel_stack_gdt) - rsp});
+
 
         pf_log.err("Page Fault at address: 0x{X:0>16}", .{fault_addr});
         pf_log.err("  RIP: 0x{X:0>16}", .{frame.rip});
-        pf_log.err("  Error Code: 0x{X:0>16}", .{frame.error_code_val});
+        pf_log.err("  Error Code: 0x{X:0>16}", .{frame.error_code});
         pf_log.err("  Type: {s} {s} {s}", .{
             if (present) "protection violation" else "page not present",
             if (write) "write" else "read",
