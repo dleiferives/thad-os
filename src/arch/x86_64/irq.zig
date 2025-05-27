@@ -7,6 +7,7 @@ const pf_log = std.log.scoped(.irq_page_fault);
 // Core Types and Enums
 // ============================================================================
 
+extern var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack");
 pub const Vector = enum(u8) {
     // CPU Exceptions
     divide_error = 0,
@@ -326,7 +327,10 @@ pub const exceptions = struct {
         const write = (frame.error_code & 2) != 0;
         const user = (frame.error_code & 4) != 0;
         const rsp = asm volatile("mov %%rsp, %%rax" : [_] "={rax}" (-> usize));
+        const stack_ptr = asm volatile("movabsq $kernel_stack, %%rax" : [_] "={rax}" (-> usize));
+
         std.log.err("RSP {} {}",.{rsp, @intFromPtr(&gdt.kernel_stack_gdt)});
+        std.log.err("RSP {} {}",.{rsp, stack_ptr});
         std.log.err("diff 0x{X:0>16}",.{@intFromPtr(&gdt.kernel_stack_gdt) - rsp});
 
 
