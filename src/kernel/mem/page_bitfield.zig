@@ -1,3 +1,5 @@
+// TODO @(dleiferives,98039049-8979-4469-b377-878aa2317aff): Add test that he
+// wants where we allocate and write to all frames and then free them ~#
 const std = @import("std");
 
 const types = @import("types.zig");
@@ -166,12 +168,16 @@ pub const PageBitField = struct {
 
     // Gets the page address from the page id.
     pub fn pageFromId(self: *PageBitField, id: u64) ?u64 {
+        verbose_log.info("Getting page from id: {}", .{id});
         if (id >= self.pages) {
+            verbose_log.info("Page id is out of range", .{});
             return null;
         }
         for (self.bit_ranges,0..) |bit_range,range_idx| {
             if (!bit_range.contains(id)) continue;
-            const address = self.ranges[range_idx].start + ((id - bit_range.start) * 4096);
+            const aligned_start = std.mem.alignForward(u64, self.ranges[range_idx].start, 4096);
+            const address = aligned_start + (4096 * (id - bit_range.start));
+            verbose_log.info("Found page address: 0x{X:0>16}", .{address});
             return address;
         }
         return null;
@@ -182,6 +188,7 @@ pub const PageBitField = struct {
     /// Returns the address of the page.
     /// If no pages are available, returns null.
     pub fn allocatePage(self: *PageBitField) ?u64 {
+        verbose_log.info("Allocating page", .{});
         for (self.bitfield,0..) |entry, index| {
             if (entry != 0xFFFFFFFFFFFFFFFF) {
                 // find the first bit that is not set
@@ -190,7 +197,34 @@ pub const PageBitField = struct {
                 // This means that we're always going to allocate from the end forward.
                 const bit_offset = @ctz(~entry);
                 const page_id = (index << 6) + bit_offset;
-                return self.pageFromId(page_id);
+                verbose_log.info("Found page id: {}", .{page_id});
+                const page = self.pageFromId(page_id);
+                if (page) |address| {
+                    // set the bit in the bitfield
+                    const mask: u64 = @as(u64,1) << @as(u6,@truncate(bit_offset));
+                    self.bitfield[index] |= mask;
+                    verbose_log.info("Allocated page: 0x{X:0>16}", .{address});
+                    return address;
+                } else {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    pub fn largestFreePage(self: *PageBitField) ?u64 {
+        verbose_log.info("Finding largest free page", .{});
+        for (self.bitfield,0..) |entry, index| {
+            if (entry != 0xFFFFFFFFFFFFFFFF) {
+                // find the first bit that is not set
+                const bit_offset = @ctz(~entry);
+                const page_id = (index << 6) + bit_offset;
+                const page = self.pageFromId(page_id);
+                if (page) |address| {
+                    verbose_log.info("Largest free page found: 0x{X:0>16}", .{address});
+                    return address;
+                }
             }
         }
         return null;

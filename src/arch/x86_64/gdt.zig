@@ -1,377 +1,494 @@
 //! Global Descriptor Table (GDT) implementation for x86_64
-//! Defines memory segments and provides the foundation for privilege levels.
-//! In 64-bit mode, segmentation is largely vestigial but still required for:
-//! - Code/Data segment selectors (base/limit ignored)
-//! - Task State Segment loading
-//! - Privilege level transitions (syscalls, interrupts)
+//! Provides kernel/user privilege separation and Task State Segment (TSS) management
+
 const std = @import("std");
+const arch = @import("../arch.zig");
+
 const log = std.log.scoped(.arch_gdt);
 
+// ============================================================================
+// GDT Constants and Structures
+// ============================================================================
+
 /// GDT Access byte flags
-pub const Access = struct {
-    pub const PRESENT = 1 << 7;
-    pub const RING0 = 0 << 5;
-    pub const RING1 = 1 << 5;
-    pub const RING2 = 2 << 5;
-    pub const RING3 = 3 << 5;
-    pub const SYSTEM = 0 << 4;
-    pub const CODE_DATA = 1 << 4; // S bit
-    pub const EXECUTABLE = 1 << 3;
-    pub const CONFORMING = 1 << 2;
-    pub const READABLE = 1 << 1;
-    pub const WRITABLE = 1 << 1;
-    pub const ACCESSED = 1 << 0;
+const ACCESS = struct {
+    const PRESENT: u8 = 1 << 7;       // Present bit
+    const RING0: u8 = 0 << 5;         // Ring 0 (kernel)
+    const RING3: u8 = 3 << 5;         // Ring 3 (user)
+    const SYSTEM: u8 = 1 << 4;        // System segment (code/data)
+    const EXECUTABLE: u8 = 1 << 3;    // Executable (code segment)
+    const DIRECTION: u8 = 1 << 2;     // Direction/conforming
+    const READABLE: u8 = 1 << 1;      // Readable (code) / Writable (data)
+    const ACCESSED: u8 = 1 << 0;      // Accessed bit
 
-    // Common combinations
-    pub const KERNEL_CODE = PRESENT | RING0 | CODE_DATA | EXECUTABLE | READABLE;
-    pub const KERNEL_DATA = PRESENT | RING0 | CODE_DATA | WRITABLE;
-    pub const USER_CODE = PRESENT | RING3 | CODE_DATA | EXECUTABLE | READABLE;
-    pub const USER_DATA = PRESENT | RING3 | CODE_DATA | WRITABLE;
+    // TSS type (for system descriptors)
+    const TSS_AVAILABLE: u8 = 0x9;    // Available 64-bit TSS
 };
 
-pub const DPL = enum(u2) {
-    KERNEL = 0,
-    USER = 3,
-    pub fn fromU2(dpl: u2) DPL {
-        return dpl;
+/// GDT Flags (upper 4 bits of limit/flags field)
+const FLAGS = struct {
+    const GRANULARITY: u8 = 1 << 3;   // 4KB granularity
+    const SIZE: u8 = 1 << 2;          // 32-bit segment (ignored in 64-bit)
+    const LONG_MODE: u8 = 1 << 1;     // 64-bit code segment
+};
+
+/// Segment selectors (indexes into GDT)
+pub const SELECTOR = struct {
+    pub const NULL: u16 = 0x00;
+    pub const KERNEL_CODE: u16 = 0x08;
+    pub const KERNEL_DATA: u16 = 0x10;
+    pub const USER_DATA: u16 = 0x18;    // Note: data comes before code for sysret
+    pub const USER_CODE: u16 = 0x20;
+    pub const TSS: u16 = 0x28;
+
+    // RPL (Requested Privilege Level) masks
+    pub const RPL_MASK: u16 = 0x03;
+    pub const KERNEL_RPL: u16 = 0x00;
+    pub const USER_RPL: u16 = 0x03;
+
+    // Helper functions
+    pub fn withRPL(selector: u16, rpl: u16) u16 {
+        return (selector & ~RPL_MASK) | (rpl & RPL_MASK);
     }
-    pub fn toU2(self: DPL) u2 {
-        return self;
-    }
 };
 
-/// GDT Flags byte (high 4 bits)
-pub const Flags = struct {
-    pub const PAGE_GRANULARITY = 1 << 3; // G bit
-    pub const SIZE_32 = 1 << 2; // DB bit
-    pub const LONG_MODE = 1 << 1; // L bit
+/// Standard GDT entry (8 bytes)
+const GdtEntry = packed struct {
+    limit_low: u16,     // Lower 16 bits of limit
+    base_low: u16,      // Lower 16 bits of base
+    base_mid: u8,       // Middle 8 bits of base
+    access: u8,         // Access byte
+    limit_flags: u8,    // Upper 4 bits of limit + flags
+    base_high: u8,      // Upper 8 bits of base
 
-    // Common combinations
-    pub const PROTECTED_MODE = PAGE_GRANULARITY | SIZE_32;
-    pub const LONG_MODE_CODE = PAGE_GRANULARITY | LONG_MODE;
-};
-
-/// 64-bit segment descriptor
-pub const Descriptor = packed struct {
-    limit_low: u16 = 0,
-    base_low: u16 = 0,
-    base_middle: u8 = 0,
-    access_byte: u8 = 0,
-    limit_high_flags: u8 = 0, // Upper 4 bits are flags
-    base_high: u8 = 0,
-
-    /// Initialize a segment descriptor with the given parameters
-    pub fn init(base: u32, limit: u20, access: u8, flags: u4) Descriptor {
-        return .{
+    fn init(base: u32, limit: u32, access: u8, flags: u8) GdtEntry {
+        return GdtEntry{
             .limit_low = @truncate(limit),
             .base_low = @truncate(base),
-            .base_middle = @truncate(base >> 16),
-            .access_byte = access,
-            .limit_high_flags = @truncate((limit >> 16) | (@as(u8, flags) << 4)),
+            .base_mid = @truncate(base >> 16),
+            .access = access,
+            .limit_flags = @as(u8,@truncate(limit >> 16)) | (flags << 4),
             .base_high = @truncate(base >> 24),
         };
     }
+
+    fn initNull() GdtEntry {
+        return std.mem.zeroes(GdtEntry);
+    }
+
+    fn initCode(ring: u8, long_mode: bool) GdtEntry {
+        var access_byte = ACCESS.PRESENT | ACCESS.SYSTEM | ACCESS.EXECUTABLE | ACCESS.READABLE;
+        if (ring == 0) {
+            access_byte |= ACCESS.RING0;
+        } else {
+            access_byte |= ACCESS.RING3;
+        }
+
+        var flags_byte: u8 = FLAGS.GRANULARITY;
+        if (long_mode) {
+            flags_byte |= FLAGS.LONG_MODE;
+        } else {
+            flags_byte |= FLAGS.SIZE;
+        }
+
+        return GdtEntry.init(0, 0xFFFFF, access_byte, flags_byte);
+    }
+
+    fn initData(ring: u8) GdtEntry {
+        var access_byte = ACCESS.PRESENT | ACCESS.SYSTEM | ACCESS.READABLE;
+        if (ring == 0) {
+            access_byte |= ACCESS.RING0;
+        } else {
+            access_byte |= ACCESS.RING3;
+        }
+
+        return GdtEntry.init(0, 0xFFFFF, access_byte, FLAGS.GRANULARITY | FLAGS.SIZE);
+    }
 };
 
-// comptime assert that the size of Descriptor is 8 bytes
-comptime {
-    const descriptor_size = @sizeOf(Descriptor);
-    const expected_size = 8;
-    if (descriptor_size != expected_size) {
-        @compileError("Descriptor size mismatch: expected 8 bytes");
-    }
-}
+/// TSS entry (16 bytes in x86_64) - spans two GDT entries
+const TssEntry = packed struct {
+    limit_low: u16,
+    base_low: u16,
+    base_mid: u8,
+    access: u8,
+    limit_flags: u8,
+    base_high: u8,
+    base_upper: u32,    // Upper 32 bits of base (x86_64 only)
+    reserved: u32,      // Must be zero
 
-/// 16-byte system descriptor for TSS (split over two u64s)
-/// Required because 64-bit TSS needs a 64-bit base address
-pub const TssDescriptor = packed struct {
-    // First 8 bytes similar to Descriptor
-    limit_low: u16 = 0,
-    base_low: u16 = 0,
-    base_middle: u8 = 0,
-    access_byte: u8 = 0, // Type 0b1001 for 64-bit TSS
-    limit_high_flags: u8 = 0,
-    base_high: u8 = 0,
-
-    // Second 8 bytes specific to 64-bit TSS
-    base_upper: u32 = 0,
-    reserved: u32 = 0,
-
-    /// Initialize a TSS descriptor with the given base and limit
-    pub fn init(base: u64, limit: u20) TssDescriptor {
-        return .{
+    fn init(tss_base: u64) TssEntry {
+        const limit = @sizeOf(TaskStateSegment) - 1;
+        return TssEntry{
             .limit_low = @truncate(limit),
-            .base_low = @truncate(base),
-            .base_middle = @truncate(base >> 16),
-            // Present, ring0, system, TSS available (0b1001)
-            .access_byte = 0b10001001,
-            .limit_high_flags = @truncate((limit >> 16) & 0x0F),
-            .base_high = @truncate(base >> 24),
-            .base_upper = @truncate(base >> 32),
+            .base_low = @truncate(tss_base),
+            .base_mid = @truncate(tss_base >> 16),
+            .access = ACCESS.PRESENT | ACCESS.TSS_AVAILABLE,
+            .limit_flags = @truncate(limit >> 16),
+            .base_high = @truncate(tss_base >> 24),
+            .base_upper = @truncate(tss_base >> 32),
             .reserved = 0,
         };
     }
 };
 
-// comptime assert that the size of TssDescriptor is 16 bytes
-comptime {
-    const tss_descriptor_size = @sizeOf(TssDescriptor);
-    const expected_tss_descriptor_size = 16;
-    if (tss_descriptor_size != expected_tss_descriptor_size) {
-        @compileError("TSS Descriptor size mismatch: expected 16 bytes");
-    }
-}
+/// Task State Segment structure
+const TaskStateSegment = packed struct {
+    reserved1: u32,
+    rsp0: u64,          // Stack pointer for ring 0
+    rsp1: u64,          // Stack pointer for ring 1 (unused)
+    rsp2: u64,          // Stack pointer for ring 2 (unused)
+    reserved2: u64,
+    ist1: u64,          // Interrupt Stack Table 1
+    ist2: u64,          // Interrupt Stack Table 2
+    ist3: u64,          // Interrupt Stack Table 3
+    ist4: u64,          // Interrupt Stack Table 4
+    ist5: u64,          // Interrupt Stack Table 5
+    ist6: u64,          // Interrupt Stack Table 6
+    ist7: u64,          // Interrupt Stack Table 7
+    reserved3: u64,
+    reserved4: u16,
+    iomap_base: u16,    // I/O Map Base Address
 
-/// GDTR structure for loading with lgdt
-pub const Gdtr = packed struct {
-    size: u16,
-    offset: u64,
-};
-
-/// Segment selector indices for our GDT
-// Long jump to a selector
-// This is a 16-bit value with the following structure:
-// - 13 bits for the selector index
-// - 1 bit for the table indicator (0 for GDT, 1 for LDT)
-// - 2 bits for the requestor privilege level (RPL)
-//
-// You cannot use a selector with RPL 0 in user mode, so we set the RPL to 3
-// This will allow us to use the selector in user mode, but it will not be
-// able to access kernel memory.
-//
-// The selector index is the index of the descriptor in the GDT.
-//
-// Fundementally the selector is how we request to go to user mode.
-pub const Selector = packed struct {
-    selector_index: u13,
-    table_indicator: u1,
-    requestor_priv_level: u2, // RPL needs to be 3 to be in user mode.
-
-    pub const NULL = 0x00;
-    pub const KERNEL_CODE = 0x08; // 1st entry after null
-    pub const KERNEL_DATA = 0x10; // 2nd entry after null
-    pub const USER_DATA = 0x18;   // 3rd entry (for future)
-    pub const USER_CODE = 0x20;   // 4th entry (for future)
-    pub const TSS = 0x28;         // 5th entry for tss lmao
-    pub fn fromU16(selector: u16) Selector {
-        return .{
-            .selector_index = @truncate(selector & 0xFFF8),
-            .table_indicator = @truncate((selector >> 3) & 0x1),
-            .requestor_priv_level = @truncate((selector >> 5) & 0x3),
+    fn init() TaskStateSegment {
+        return TaskStateSegment{
+            .reserved1 = 0,
+            .rsp0 = 0,
+            .rsp1 = 0,
+            .rsp2 = 0,
+            .reserved2 = 0,
+            .ist1 = 0,
+            .ist2 = 0,
+            .ist3 = 0,
+            .ist4 = 0,
+            .ist5 = 0,
+            .ist6 = 0,
+            .ist7 = 0,
+            .reserved3 = 0,
+            .reserved4 = 0,
+            .iomap_base = @sizeOf(TaskStateSegment),
         };
     }
-
-    pub fn toU16(self: Selector) u16 {
-        return @truncate(self.selector_index | (self.table_indicator << 3) | (self.requestor_priv_level << 5));
-    }
 };
 
-comptime {
-    const selector_size = @sizeOf(Selector);
-    const expected_size = 2;
-    if (selector_size != expected_size) {
-        @compileError("Selector size mismatch: expected 2 bytes");
-    }
-}
-
-/// Our GDT structure with 6 entries (null, kernel code/data, user code/data, TSS)
-/// The TSS is a 16-byte descriptor, so we use a union for proper alignment.
-/// Note that entry "slots" are not necessarily 8 bytes each due to this.
-pub const Gdt = packed struct {
-    null_descriptor: Descriptor = .{}, // size 8 bytes
-    kernel_code: Descriptor = .{}, // size 8 bytes
-    kernel_data: Descriptor = .{}, // size 8 bytes
-    user_data: Descriptor = .{}, // size 8 bytes
-    user_code: Descriptor = .{}, // size 8 bytes
-    tss_descriptor: TssDescriptor = .{}, // size 16 bytes
+/// GDT Pointer structure for lgdt instruction
+const GdtPointer = packed struct {
+    limit: u16,
+    base: u64,
 };
 
-// comptime assert for the offsets within the Gdt structure
-comptime {
-    const null_offset = @offsetOf(Gdt, "null_descriptor");
-    const kernel_code_offset = @offsetOf(Gdt, "kernel_code");
-    const kernel_data_offset = @offsetOf(Gdt, "kernel_data");
-    const user_data_offset = @offsetOf(Gdt, "user_data");
-    const user_code_offset = @offsetOf(Gdt, "user_code");
-    const tss_descriptor_offset = @offsetOf(Gdt, "tss_descriptor");
+// ============================================================================
+// Global GDT State
+// ============================================================================
 
+/// The actual GDT table (7 entries: null, kcode, kdata, udata, ucode, tss_low, tss_high)
+var gdt_table: [7]u64 align(8) = undefined;
 
-    if (null_offset != 0x0) {
-        @compileLog("Null descriptor offset: {}",.{null_offset});
-        @compileLog("Kernel code descriptor offset: {}",.{kernel_code_offset});
-        @compileLog("Kernel data descriptor offset: {}",.{kernel_data_offset});
-        @compileLog("User data descriptor offset: {}",.{user_data_offset});
-        @compileLog("User code descriptor offset: {}",.{user_code_offset});
-        @compileLog("TSS descriptor offset: {}",.{tss_descriptor_offset});
-        @compileError("Null descriptor offset mismatch");
-    }
-    if (kernel_code_offset != 0x8) {
-        @compileLog("Null descriptor offset: {}",.{null_offset});
-        @compileLog("Kernel code descriptor offset: {}",.{kernel_code_offset});
-        @compileLog("Kernel data descriptor offset: {}",.{kernel_data_offset});
-        @compileLog("User data descriptor offset: {}",.{user_data_offset});
-        @compileLog("User code descriptor offset: {}",.{user_code_offset});
-        @compileLog("TSS descriptor offset: {}",.{tss_descriptor_offset});
-        @compileError("Kernel code descriptor offset mismatch");
-    }
-    if (kernel_data_offset != 0x10) {
-        @compileLog("Null descriptor offset: {}",.{null_offset});
-        @compileLog("Kernel code descriptor offset: {}",.{kernel_code_offset});
-        @compileLog("Kernel data descriptor offset: {}",.{kernel_data_offset});
-        @compileLog("User data descriptor offset: {}",.{user_data_offset});
-        @compileLog("User code descriptor offset: {}",.{user_code_offset});
-        @compileLog("TSS descriptor offset: {}",.{tss_descriptor_offset});
-        @compileError("Kernel data descriptor offset mismatch");
-    }
-    if (user_data_offset != 0x18) {
-        @compileLog("Null descriptor offset: {}",.{null_offset});
-        @compileLog("Kernel code descriptor offset: {}",.{kernel_code_offset});
-        @compileLog("Kernel data descriptor offset: {}",.{kernel_data_offset});
-        @compileLog("User data descriptor offset: {}",.{user_data_offset});
-        @compileLog("User code descriptor offset: {}",.{user_code_offset});
-        @compileLog("TSS descriptor offset: {}",.{tss_descriptor_offset});
-        @compileError("User data descriptor offset mismatch");
-    }
-    if (user_code_offset != 0x20) {
-        @compileLog("Null descriptor offset: {}",.{null_offset});
-        @compileLog("Kernel code descriptor offset: {}",.{kernel_code_offset});
-        @compileLog("Kernel data descriptor offset: {}",.{kernel_data_offset});
-        @compileLog("User data descriptor offset: {}",.{user_data_offset});
-        @compileLog("User code descriptor offset: {}",.{user_code_offset});
-        @compileLog("TSS descriptor offset: {}",.{tss_descriptor_offset});
-        @compileError("User code descriptor offset mismatch");
-    }
-    if (tss_descriptor_offset != 0x28) {
-        @compileLog("Null descriptor offset: {}",.{null_offset});
-        @compileLog("Kernel code descriptor offset: {}",.{kernel_code_offset});
-        @compileLog("Kernel data descriptor offset: {}",.{kernel_data_offset});
-        @compileLog("User data descriptor offset: {}",.{user_data_offset});
-        @compileLog("User code descriptor offset: {}",.{user_code_offset});
-        @compileLog("TSS descriptor offset: {}",.{tss_descriptor_offset});
-        @compileError("TSS descriptor offset mismatch");
-    }
-}
+/// TSS instance
+var tss: TaskStateSegment align(16) = undefined;
 
-/// Global GDT instance
-var gdt align(16) = Gdt{};
+/// GDT pointer for lgdt
+var gdt_ptr: GdtPointer = undefined;
 
-/// Global GDTR instance
-var gdtr: Gdtr = undefined;
+/// Kernel stack for ring 0 operations
+var kernel_stack: [0x4000]u8 align(16) = undefined; // 16KB kernel stack
+var double_fault_stack: [0x1000]u8 align(16) = undefined; // 4KB DF stack
+var page_fault_stack: [0x10000]u8 align(16) = undefined;   // 4KB PF stack
 
-/// Initialize and load the GDT
+/// Flag to track initialization
+var initialized: bool = false;
+
+// ============================================================================
+// Core GDT Functions
+// ============================================================================
+
+/// Initialize the GDT with proper kernel/user segments and TSS
 pub fn init() void {
-    // Null descriptor (required)
-    gdt.null_descriptor = .{};
+    if (initialized) {
+        log.warn("GDT already initialized", .{});
+        return;
+    }
 
-    // Kernel code segment (executable, readable)
-    gdt.kernel_code = Descriptor.init(
-        0, 0xFFFFF,
-        Access.KERNEL_CODE,
-        @truncate(Flags.LONG_MODE_CODE >> 4)
-    );
+    log.info("Initializing GDT...", .{});
 
-    // Kernel data segment (writable)
-    gdt.kernel_data = Descriptor.init(
-        0, 0xFFFFF,
-        Access.KERNEL_DATA,
-        @truncate(Flags.PROTECTED_MODE >> 4)
-    );
+    // Clear the GDT table
+    @memset(std.mem.asBytes(&gdt_table), 0);
 
-    // User data segment (ring 3, writable)
-    gdt.user_data = Descriptor.init(
-        0, 0xFFFFF,
-        Access.USER_DATA,
-        @truncate(Flags.PROTECTED_MODE >> 4)
-    );
+    // Set up GDT entries as u64 values
+    const entries = @as([*]GdtEntry, @ptrCast(&gdt_table));
 
-    // User code segment (ring 3, executable, readable)
-    gdt.user_code = Descriptor.init(
-        0, 0xFFFFF,
-        Access.USER_CODE,
-        @truncate(Flags.LONG_MODE_CODE >> 4)
-    );
+    // Entry 0: Null descriptor
+    entries[0] = GdtEntry.initNull();
 
-    // TSS descriptor gets initialized when loadTss is called
+    // Entry 1: Kernel code segment (ring 0, 64-bit)
+    entries[1] = GdtEntry.initCode(0, true);
 
-    // Set up GDTR and load GDT
-    gdtr = .{
-        .size = @sizeOf(Gdt) - 1,
-        .offset = @intFromPtr(&gdt),
+    // Entry 2: Kernel data segment (ring 0)
+    entries[2] = GdtEntry.initData(0);
+
+    // Entry 3: User data segment (ring 3) - must come before user code for sysret
+    entries[3] = GdtEntry.initData(3);
+
+    // Entry 4: User code segment (ring 3, 64-bit)
+    entries[4] = GdtEntry.initCode(3, true);
+
+    // Entries 5-6: TSS (takes 16 bytes = 2 entries in x86_64)
+    tss = TaskStateSegment.init();
+    const tss_addr = @intFromPtr(&tss);
+    const tss_entry = TssEntry.init(tss_addr);
+
+    // Copy TSS entry bytes into GDT
+    const tss_bytes = std.mem.asBytes(&tss_entry);
+    var entries_ptr: [*]u8 = @ptrCast(&entries[5]);
+    for (0..16) |i| {
+        entries_ptr[i] = tss_bytes[i];
+    }
+    // @memcpy(std.mem.asBytes(&entries[5])[0..16], tss_bytes);
+
+    // Set up kernel stack in TSS
+    const kernel_stack_top = @intFromPtr(&kernel_stack) + kernel_stack.len;
+    tss.rsp0 = kernel_stack_top;
+
+
+    const df_stack_top = @intFromPtr(&double_fault_stack) + double_fault_stack.len;
+    const pf_stack_top = @intFromPtr(&page_fault_stack) + page_fault_stack.len;
+    setInterruptStack(1, df_stack_top); // Assuming IST1 for Double Fault
+    setInterruptStack(2, pf_stack_top); // Assuming IST2 for Page Fault
+
+    // Set up GDT pointer
+    gdt_ptr = GdtPointer{
+        .limit = @sizeOf(@TypeOf(gdt_table)) - 1,
+        .base = @intFromPtr(&gdt_table),
     };
 
+    // Load the GDT
     loadGdt();
 
-    log.debug("Reloading segment registers\n", .{});
-    // Now reload segment registers (except CS, which requires far jump)
-    asm volatile (
-        \\mov $0x10, %%ax  // Kernel data segment
-        \\mov %%ax, %%ds
-        \\mov %%ax, %%es
-        \\mov %%ax, %%ss
-        \\mov %%ax, %%fs
-        \\mov %%ax, %%gs
-        ::: "ax", "memory"
-    );
+    // Load TSS
+    loadTss();
 
-    // Reload CS register via far return
-    // This is a bit tricky - we push the new CS and instruction pointer,
-    // then use retfq to "return" to the next instruction with the new CS
-    asm volatile (
-        \\pushq $0x08      // Kernel code segment
-        \\leaq 1f(%%rip), %%rax
-        \\pushq %%rax
-        \\retfq
-        \\1:
-        ::: "rax", "memory"
-    );
-    log.debug("Segment registers reloaded\n", .{});
+    initialized = true;
+    log.info("GDT initialized successfully", .{});
 }
 
-/// Helper to load the TSS into the GDT
-/// Called by tss.zig
-pub fn loadTss(tss_addr: *const anyopaque, tss_size: u16) void {
-    log.debug("Loading TSS at address {x} with size {d}\n", .{tss_addr, tss_size});
-    // Update the TSS descriptor in our GDT
-    gdt.tss_descriptor = TssDescriptor.init(
-        @intFromPtr(tss_addr),
-        @intCast(tss_size - 1)  // Convert to u20 and subtract 1 as required by TSS descriptor
-    );
-
-    // Load the task register with our TSS selector
-    asm volatile (
-        \\mov $0x28, %%ax  // TSS selector
-        \\ltr %%ax
-        ::: "ax", "memory"
-    );
-    log.debug("TSS loaded with selector {x}\n", .{0x28});
-}
-
-/// Load the GDT using the lgdt instruction
+/// Load the GDT using lgdt instruction
 fn loadGdt() void {
-    log.debug("Loading GDT: {*}\n{any}\n\n", .{&gdtr, gdtr});
-    asm volatile ("lgdt (%[gdtr])"
+    asm volatile (
+        \\lgdt (%[gdt_ptr])
         :
-        : [gdtr] "r" (&gdtr)
+        : [gdt_ptr] "r" (&gdt_ptr),
         : "memory"
     );
-    log.debug("GDT loaded\n",.{});
+
+    // Reload segment registers
+    asm volatile (
+        \\mov %[data_sel], %%ax
+        \\mov %%ax, %%ds
+        \\mov %%ax, %%es
+        \\mov %%ax, %%fs
+        \\mov %%ax, %%gs
+        \\mov %%ax, %%ss
+        \\pushq %[code_sel]
+        \\leaq 1f(%%rip), %%rax
+        \\pushq %%rax
+        \\lretq
+        \\1:
+        :
+        : [data_sel] "i" (SELECTOR.KERNEL_DATA),
+          [code_sel] "i" (SELECTOR.KERNEL_CODE),
+        : "rax", "memory"
+    );
 }
 
-/// Export our segment selectors for usage by other modules
-pub const KERNEL_CODE_SELECTOR = Selector.KERNEL_CODE;
-pub const KERNEL_DATA_SELECTOR = Selector.KERNEL_DATA;
-pub const USER_CODE_SELECTOR = Selector.USER_CODE;
-pub const USER_DATA_SELECTOR = Selector.USER_DATA;
-pub const TSS_SELECTOR = Selector.TSS;
-
-test "gdt descriptor sizes" {
-    try std.testing.expectEqual(8, @sizeOf(Descriptor));
-    try std.testing.expectEqual(16, @sizeOf(TssDescriptor));
-    try std.testing.expectEqual(10, @sizeOf(Gdtr));
+/// Load the TSS using ltr instruction
+fn loadTss() void {
+    asm volatile (
+        \\ltr %[tss_sel]
+        :
+        : [tss_sel] "r" (@as(u16, SELECTOR.TSS)),
+        : "memory"
+    );
 }
 
-test "segment selector values" {
-    try std.testing.expectEqual(0x08, KERNEL_CODE_SELECTOR);
-    try std.testing.expectEqual(0x10, KERNEL_DATA_SELECTOR);
-    try std.testing.expectEqual(0x28, TSS_SELECTOR);
+// ============================================================================
+// Stack Management
+// ============================================================================
+
+/// Set the kernel stack pointer in the TSS
+/// This stack will be used when transitioning from user mode to kernel mode
+pub fn setKernelStack(stack_top: u64) void {
+    if (!initialized) {
+        log.err("GDT not initialized", .{});
+        return;
+    }
+
+    tss.rsp0 = stack_top;
+    log.debug("Kernel stack set to 0x{X:0>16}", .{stack_top});
+}
+
+/// Set an interrupt stack table entry
+pub fn setInterruptStack(ist_index: u3, stack_top: u64) void {
+    if (!initialized) {
+        log.err("GDT not initialized", .{});
+        return;
+    }
+
+    if (ist_index == 0 or ist_index > 7) {
+        log.err("Invalid IST index: {}", .{ist_index});
+        return;
+    }
+
+    switch (ist_index) {
+        1 => tss.ist1 = stack_top,
+        2 => tss.ist2 = stack_top,
+        3 => tss.ist3 = stack_top,
+        4 => tss.ist4 = stack_top,
+        5 => tss.ist5 = stack_top,
+        6 => tss.ist6 = stack_top,
+        7 => tss.ist7 = stack_top,
+        else => unreachable,
+    }
+
+    log.debug("IST{} set to 0x{X:0>16}", .{ ist_index, stack_top });
+}
+
+/// Get the current kernel stack pointer from TSS
+pub fn getKernelStack() u64 {
+    return if (initialized) tss.rsp0 else 0;
+}
+
+// ============================================================================
+// User Mode Transition
+// ============================================================================
+
+/// Switch to user mode and jump to the specified address
+/// This function does not return - it transfers control to user space
+pub fn switchToUserMode(user_rip: u64, user_rsp: u64) noreturn {
+    if (!initialized) {
+        @panic("GDT not initialized - cannot switch to user mode");
+    }
+
+    log.info("Switching to user mode: RIP=0x{X:0>16}, RSP=0x{X:0>16}", .{ user_rip, user_rsp });
+
+    // Set up the stack frame for iretq
+    // The stack should contain (from top to bottom):
+    // - SS (user data selector with RPL=3)
+    // - RSP (user stack pointer)
+    // - RFLAGS (with interrupts enabled)
+    // - CS (user code selector with RPL=3)
+    // - RIP (user instruction pointer)
+
+    const user_cs = SELECTOR.USER_CODE | SELECTOR.USER_RPL;
+    const user_ss = SELECTOR.USER_DATA | SELECTOR.USER_RPL;
+    const user_flags: u64 = 0x202; // IF=1, Reserved bit=1
+
+    asm volatile (
+        \\cli
+        \\mov %[user_ds], %%ax
+        \\mov %%ax, %%ds
+        \\mov %%ax, %%es
+        \\mov %%ax, %%fs
+        \\mov %%ax, %%gs
+        \\
+        \\pushq %[user_ss]
+        \\pushq %[user_rsp]
+        \\pushq %[user_flags]
+        \\pushq %[user_cs]
+        \\pushq %[user_rip]
+        \\iretq
+        :
+        : [user_ss] "i" (user_ss),
+          [user_rsp] "r" (user_rsp),
+          [user_flags] "i" (user_flags),
+          [user_cs] "i" (user_cs),
+          [user_rip] "r" (user_rip),
+          [user_ds] "i" (SELECTOR.USER_DATA | SELECTOR.USER_RPL),
+        : "rax", "memory"
+    );
+
+    unreachable;
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Get the current code segment selector
+pub fn getCurrentCS() u16 {
+    return asm volatile (
+        \\mov %%cs, %[result]
+        : [result] "=r" (-> u16),
+    );
+}
+
+/// Get the current data segment selector
+pub fn getCurrentDS() u16 {
+    return asm volatile (
+        \\mov %%ds, %[result]
+        : [result] "=r" (-> u16),
+    );
+}
+
+/// Check if currently running in kernel mode
+pub fn isKernelMode() bool {
+    return (getCurrentCS() & SELECTOR.RPL_MASK) == SELECTOR.KERNEL_RPL;
+}
+
+/// Check if currently running in user mode
+pub fn isUserMode() bool {
+    return (getCurrentCS() & SELECTOR.RPL_MASK) == SELECTOR.USER_RPL;
+}
+
+/// Print GDT information for debugging
+pub fn debugPrint() void {
+    if (!initialized) {
+        log.info("GDT not initialized", .{});
+        return;
+    }
+
+    log.info("=== GDT Debug Information ===", .{});
+    log.info("GDT Base: 0x{X:0>16}", .{gdt_ptr.base});
+    log.info("GDT Limit: 0x{X:0>4}", .{gdt_ptr.limit});
+    log.info("TSS Base: 0x{X:0>16}", .{@intFromPtr(&tss)});
+    log.info("Current CS: 0x{X:0>4} ({})", .{ getCurrentCS(), if (isKernelMode()) "kernel" else "user" });
+    log.info("Current DS: 0x{X:0>4}", .{getCurrentDS()});
+    log.info("Kernel Stack (RSP0): 0x{X:0>16}", .{tss.rsp0});
+
+    // Print GDT entries
+    for (gdt_table, 0..) |entry, i| {
+        if (entry != 0) {
+            log.info("GDT[{}]: 0x{X:0>16}", .{ i, entry });
+        }
+    }
+}
+
+/// Test function to verify GDT setup
+pub fn tester() !void {
+    log.info("Running GDT tests...", .{});
+
+    // Basic sanity checks
+    if (!initialized) {
+        return error.NotInitialized;
+    }
+
+    if (!isKernelMode()) {
+        return error.NotInKernelMode;
+    }
+
+    if (getKernelStack() == 0) {
+        return error.NoKernelStack;
+    }
+
+    // Verify TSS is loaded
+    const tss_selector = asm volatile (
+        \\str %[result]
+        : [result] "=r" (-> u16),
+    );
+
+    if (tss_selector != SELECTOR.TSS) {
+        log.err("TSS not properly loaded: expected 0x{X:0>4}, got 0x{X:0>4}", .{ SELECTOR.TSS, tss_selector });
+        return error.TssNotLoaded;
+    }
+
+    log.info("GDT tests passed", .{});
 }

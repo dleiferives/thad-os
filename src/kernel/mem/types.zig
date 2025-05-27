@@ -15,8 +15,8 @@ pub const MEMORY_LAYOUT = struct {
     kernel_virtual_address_end: u64,
     kernel_physical_address_start: u64,
     kernel_physical_address_end: u64,
-    kernel_virtual_stack_start: u64,
-    kernel_virtual_stack_end: u64,
+    kernel_virtual_boot_stack_start: u64,
+    kernel_virtual_boot_stack_end: u64,
 
     pub const CANONICAL_MASK: u64 = 0xFFFF_0000_0000_0000;
     pub extern const KERNEL_VIRTUAL_ADDRESS_START: u64;
@@ -27,13 +27,38 @@ pub const MEMORY_LAYOUT = struct {
     pub extern const KERNEL_VIRTUAL_STACK_END: u64;
     pub extern const KERNEL_OFFSET: u64;
 
+    pub const USER_VIRTUAL_ADDRESS_START:    u64 = 0x0000_0000_0000_0000;
+    pub const USER_VIRTUAL_ADDRESS_END:      u64 = 0x0000_007F_FFFF_FFFF;
+
+    // for like null pointer dereference and such
+    pub const USER_VIRTUAL_RESERVED_START:     u64 = 0x0000_0000_0000_0000;
+    pub const USER_VIRTUAL_RESERVED_END:       u64 = 0x0000_0000_0001_0000;
+
+    pub const USER_VIRTUAL_PROG_START:         u64 = 0x0000_0000_0010_0000;
+    pub const USER_VIRTUAL_PROG_END:           u64 = 0x0000_0000_3FFF_FFFF;
+    pub const USER_VIRTUAL_HEAP_START:         u64 = 0x0000_0000_4000_0000;
+    pub const USER_VIRTUAL_HEAP_INITIAL_END:   u64 = 0x0000_0002_0000_0000;
+    pub const USER_VIRTUAL_STACK_INITIAL_START:u64 = 0x0000_0008_FFFF_FFFF;
+    pub const USER_VIRTUAL_STACK_END:          u64 = 0x0000_007F_FFFF_FFFF;
+
+    pub const KERNEL_VIRTUAL_STACKS_START: u64 = 0xFFFFFF8001000000;
+    pub const KERNEL_VIRTUAL_STACKS_END: u64 =   0xFFFFFF8003FFFFFF;
+
+    pub const KERNEL_VIRTUAL_HEAP_START: u64 =   0xFFFFFF8004000000;
+    pub const KERNEL_VIRTUAL_HEAP_END: u64 =   0xFFFFFF81FFFFFFFF;
+
+    pub const KERNEL_VIRTUAL_RESERVED_START: u64 =   0xFFFFFF8200000000;
+    pub const KERNEL_VIRTUAL_RESERVED_END: u64 =   0xFFFFFFFFFFFFFFFF;
+
+
+
     pub fn log(self: *const MEMORY_LAYOUT) void{
         layout_log.info("Kernel virtual address start: {x}", .{self.kernel_virtual_address_start});
         layout_log.info("Kernel virtual address end: {x}", .{self.kernel_virtual_address_end});
         layout_log.info("Kernel physical address start: {x}", .{self.kernel_physical_address_start});
         layout_log.info("Kernel physical address end: {x}", .{self.kernel_physical_address_end});
-        layout_log.info("Kernel virtual stack start: {x}", .{self.kernel_virtual_stack_start});
-        layout_log.info("Kernel virtual stack end: {x}", .{self.kernel_virtual_stack_end});
+        layout_log.info("Kernel virtual stack start: {x}", .{self.kernel_virtual_boot_stack_start});
+        layout_log.info("Kernel virtual stack end: {x}", .{self.kernel_virtual_boot_stack_end});
         layout_log.info("Kernel offset: {x}", .{self.kernel_offset});
     }
 
@@ -45,8 +70,8 @@ pub const MEMORY_LAYOUT = struct {
             .kernel_virtual_address_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_ADDRESS_END),
             .kernel_physical_address_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_PHYSICAL_ADDRESS_START),
             .kernel_physical_address_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_PHYSICAL_ADDRESS_END),
-            .kernel_virtual_stack_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_START),
-            .kernel_virtual_stack_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_END),
+            .kernel_virtual_boot_stack_start = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_START),
+            .kernel_virtual_boot_stack_end = @intFromPtr(&MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_END),
         };
         result.log();
         return result;
@@ -68,8 +93,8 @@ pub const MEMORY_LAYOUT = struct {
 
     pub inline fn rangeFomKernelStack(self: *MEMORY_LAYOUT) MemoryRange {
         return MemoryRange{
-            .start = self.kernel_virtual_stack_start,
-            .end = self.kernel_virtual_stack_end,
+            .start = self.kernel_virtual_boot_stack_start,
+            .end = self.kernel_virtual_boot_stack_end,
         };
     }
 };
@@ -144,6 +169,14 @@ pub const MemoryRange = struct {
             if (result[count].is_valid()) count += 1;
         }
         return result;
+    }
+
+    pub inline fn alignStartTo(self: MemoryRange, alignment: u64) MemoryRange {
+        const aligned_start = std.mem.alignForward(u64, self.start, alignment);
+        return MemoryRange{
+            .start = aligned_start,
+            .end = self.end,
+        };
     }
 
 

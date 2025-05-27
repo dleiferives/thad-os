@@ -6,6 +6,11 @@ comptime {
     _ = kernel.panic;
 }
 
+
+pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
+    kernel.panic(msg, trace, return_address);
+}
+
 pub const std_options: std.Options = .{
     // By default, in safe build modes, the standard library will attach a segfault handler to the program to
     // print a helpful stack trace if a segmentation fault occurs. Here, we can disable this, or even enable

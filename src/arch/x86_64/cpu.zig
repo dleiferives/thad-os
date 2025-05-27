@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const gdt = @import("gdt.zig");
 
 const log = std.log.scoped(.arch_cpu);
 
@@ -22,4 +23,12 @@ pub inline fn outb(port: u16, value: u8) void {
 
 pub inline fn halt() void {
     asm volatile ("hlt");
+}
+
+pub inline fn cli() void {
+    asm volatile ("cli");
+}
+
+pub inline fn sti() void {
+    asm volatile ("sti");
 }

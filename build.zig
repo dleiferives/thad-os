@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     // target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.x86.Feature.@"16bit_mode"));
     // target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.x86.Feature.@"32bit_mode"));
     // target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.x86.Feature.@"64bit"));
-    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.x86.Feature.soft_float));
+    // target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.x86.Feature.soft_float));
 
     // Remove speedy and weird
     target_query.cpu_features_sub.addFeature(@intFromEnum(std.Target.x86.Feature.mmx));
@@ -184,7 +184,7 @@ pub fn build(b: *std.Build) void {
     drivers.addImport("kernel",kernel);
 
     // arch.addImport("core",core);
-    // arch.addImport("kernel",kernel);
+    arch.addImport("kernel",kernel);
 
     // TODO @(dleiferives,e310b4ad-095c-48ad-80fe-3b7d400194a6): move multiboot
     // header and stuff to core ~#
@@ -192,6 +192,7 @@ pub fn build(b: *std.Build) void {
 
     // Do assemble :bleh
     // arch.addAssemblyFile(b.path("src/arch/x86_64/cpu/entry_expanded.S"));
+    arch.addObjectFile(b.path("src/arch/x86_64/interrupt_stubs.o"));
 
 
     // Create an executable
@@ -313,9 +314,9 @@ pub fn build(b: *std.Build) void {
 
     // Step 5: Add a run step to boot the image in QEMU
     const run_cmd = b.addSystemCommand(&[_][]const u8{
-        "qemu-system-x86_64", "-d", "cpu_reset,guest_errors,unimp",
+        "qemu-system-x86_64", "-d", "cpu_reset,guest_errors,unimp,int",
         // "-s",
-        "-no-reboot","-no-shutdown",
+        //"-no-reboot","-no-shutdown",
         "-drive", "file=os_image.img,format=raw",
         "-serial", "stdio",
     });

@@ -1,5 +1,6 @@
 //! Simple VGA text mode driver (80x25)
 const std = @import("std");
+const arch = @import("arch");
 
 /// Writer type for std library integration
 const Writer = std.io.Writer;
@@ -76,6 +77,9 @@ fn makeEntry(ch: u8, fg: u4, bg: u4) u16 {
 
 /// Write a single character
 pub fn putChar(ch: u8) void {
+    // TODO @(dleiferives,862ce5ad-e65c-45a7-969d-aa49222a8014): add cli and sti
+    // here ~#
+    arch.irq.irq.disable();
     switch (ch) {
         '\n' => {
             column = 0;
@@ -120,7 +124,7 @@ pub fn putChar(ch: u8) void {
 
         row = HEIGHT - 1;
     }
-
+    arch.irq.irq.enable();
 }
 
 /// Write a string
