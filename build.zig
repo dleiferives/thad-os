@@ -314,8 +314,10 @@ pub fn build(b: *std.Build) void {
 
     // Step 5: Add a run step to boot the image in QEMU
     const run_cmd = b.addSystemCommand(&[_][]const u8{
-        "qemu-system-x86_64", "-d", "cpu_reset,guest_errors,unimp,int",
-        // "-s",
+        "qemu-system-x86_64", "-d",
+        "cpu_reset,guest_errors,unimp",
+        // "cpu_reset,guest_errors,unimp,int",
+        "-s",
         //"-no-reboot","-no-shutdown",
         "-drive", "file=os_image.img,format=raw",
         "-serial", "stdio",

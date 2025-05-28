@@ -13,6 +13,10 @@ const mapper_log = std.log.scoped(.mem_manager_mapper);
 const mapper_verbose_log = std.log.scoped(.mem_manager_mapper_verbose);
 const mapper_translate_log = std.log.scoped(.mem_manager_mapper_translate);
 
+var scratch_pdpt: PageTable align(4096) = undefined;
+var scratch_pd: PageTable align(4096) = undefined;
+var scratch_pt: PageTable align(4096) = undefined;
+
 pub export fn memset(dest: [*]u8, value: u8, count: usize) [*]u8 {
     var i: usize = 0;
     while (i < count) : (i += 1) {
@@ -66,7 +70,7 @@ pub const Manager = struct {
         return result;
     }
 
-    pub fn init(self: *Manager, multiboot_info: multiboot.Multiboot2Info) !void {
+    pub fn init(self: *Manager, multiboot_info: multiboot.Multiboot2Info, test_bitfield_before_page_switch: bool) !void {
         manager_log.info("Initializing memory manager", .{});
         // TODO @(dleiferives,50b1d32d-0557-4ce9-875c-a5da623b95e7): Add the physical
         // mappings from the multiboot header into the manager and then the ones from the
@@ -119,7 +123,7 @@ pub const Manager = struct {
             // Iterate through the ELF sections
             var elf_section_iterator = elf.ElfSectionIterator.init(elf_tag, true);
             while (elf_section_iterator.next()) |section| {
-                const section_map = section.toMemoryMap();
+                const section_map = section.toMemoryMap(self.memory_layout.kernel_offset) orelse continue;
                 if (section_map.virtual.get_size() == 0) continue;
                 if (section_map.virtual.start != 0) {
                     try r_virtual.append(section_map);
@@ -185,7 +189,11 @@ pub const Manager = struct {
         self.page_bitfield = try PageBitField.init(self.internal_allocator, a_physical_clean.items[0..]);
         try self.page_bitfield.reserveRanges(self.reserved_physical_ranges);
 
-        manager_log.info("Page bitfield created with {} pages and {} reserved ", .{self.page_bitfield.pages, self.page_bitfield.getReserved()});
+        if (test_bitfield_before_page_switch){
+            try self.page_bitfield.tester(self.memory_layout.kernel_offset);
+        }
+
+        manager_log.info("Page bitfield created with {} pages and {} reserved ", .{ self.page_bitfield.pages, self.page_bitfield.getReserved() });
 
         manager_log.info("Starting to create the Mapper", .{});
         // #1 - Get the current page table, and figure out if its  physical or virtual address.
@@ -197,8 +205,10 @@ pub const Manager = struct {
         const pmask_4k = PAGE_MASK_4K;
 
         // // Create a new address space (PML4)
+        try Mapper.initScratchMap(self.memory_layout.kernel_offset);
         var new_mapper = try Mapper.create(&self.page_bitfield, self.memory_layout.kernel_offset);
         self.mapper = new_mapper; // Assign to manager's mapper field
+        cpt.log();
         manager_log.info("New Mapper created.", .{});
 
         // --- Map essential kernel regions into the new_mapper ---
@@ -209,14 +219,14 @@ pub const Manager = struct {
         // A more granular approach would map sections with different flags.
         const kernel_code_data_flags = PageFlags{ .present = true, .writable = true, .execute_disable = false }; // A general kernel flag
 
-        while ( true ) {
+        while (true) {
             // TODO @(dleiferives,fd0a8391-a09e-413c-83f1-43d17b535c6f): Remove
             // the hacky solution to gettig the kernel to load properly by just
             // loading an additional meg ontop! ~#
-            if (current_phys > self.memory_layout.kernel_physical_address_end + (12 * 1024 * 1024)) {
+            if (current_phys > self.memory_layout.kernel_physical_address_end + (10 * 1024 * 1024)) {
                 if (self.page_bitfield.largestFreePage()) |largest_page| {
                     if (current_phys > largest_page) {
-                        manager_log.err("Physical address 0x{x} is larger than largest free page 0x{x}", .{current_phys, largest_page});
+                        manager_log.err("Physical address 0x{x} is larger than largest free page 0x{x}", .{ current_phys, largest_page });
                         break;
                     }
                 } else {
@@ -291,12 +301,17 @@ pub const Manager = struct {
             mma_offset += PAGE_SIZE_4K;
         }
         manager_log.info("memory_manager_allocation_buffer mapped.", .{});
-        const pml4_virt: *PageMapLevel4 = @ptrFromInt(new_mapper.pml4_phys_addr | self.memory_layout.kernel_offset);
-        pml4_virt.log_all(self.memory_layout.kernel_offset);
+        // new_mapper.scratchmapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
+        // const pml4_virt: *PageMapLevel4 = new_mapper.scratchMapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
+        // defer new_mapper.scratchMapDemap(new_mapper.pml4_phys_addr);
+        //@ptrFromInt(new_mapper.pml4_phys_addr | self.memory_layout.kernel_offset);
+        // pml4_virt.log_all(self.memory_layout.kernel_offset);
 
         // After all essential mappings are done for the new_mapper:
+        try Mapper.initScratchMap(self.memory_layout.kernel_offset);
         Mapper.loadPML4(new_mapper.pml4_phys_addr);
         manager_log.info("New PML4 (0x{x}) loaded into CR3.", .{new_mapper.pml4_phys_addr});
+        try Mapper.initScratchMap(self.memory_layout.kernel_offset);
 
         // Test translation with the new mapper
         const test_virt_addr = self.memory_layout.kernel_virtual_address_start;
@@ -308,6 +323,53 @@ pub const Manager = struct {
         } else {
             manager_log.err("Post-load test translation failed for virt 0x{x}", .{test_virt_addr});
         }
+    }
+
+    pub fn test_mapper(self: *Manager, virt_addr_start: u64) !void {
+        const free_pages: u64 = self.page_bitfield.getFreePages();
+        manager_log.info("Free pages in the bitfield: {}", .{free_pages});
+        var last_page: u64 = 0;
+        var counter: u64 = 0;
+        for (0..free_pages) |i| {
+            const page_addr = self.page_bitfield.allocatePage() orelse {
+                manager_log.warn("\nFailed to get page address stopping...", .{});
+                break;
+            };
+            manager_log.warn("Page {}: 0x{X:0>16}\r", .{ i, page_addr });
+            // Map the page to a virtual address
+            const virt_addr = virt_addr_start + (i * PAGE_SIZE_4K);
+            const flags = PageFlags{ .present = true, .writable = true, .execute_disable = false };
+            self.mapper.?.map(virt_addr, page_addr, flags) catch {
+                manager_log.err("Error appending reserved virtual map: ", .{});
+                while (true) {}
+            };
+            @memset(@as(*[64]u64, @ptrFromInt(virt_addr)), last_page);
+            last_page = virt_addr;
+            counter += 1;
+        }
+        manager_log.warn("\n", .{});
+        manager_log.info("Mapped {} pages starting from 0x{X:0>16}", .{ counter, virt_addr_start });
+
+        while (true) {
+            if (last_page == 0) {
+                manager_log.warn("\nNo more pages to test, stopping at 0x{X:0>16}", .{last_page});
+                break;
+            }
+            const data: [*]u64 = @ptrFromInt(last_page);
+            const next: u64 = data[0];
+            manager_log.warn("Unmapping 0x{X:0>16}", .{last_page});
+            const frame = self.mapper.?.unmap(last_page) catch |err| {
+                manager_log.warn("\nError unmapping page at 0x{X:0>16}: {}", .{ last_page, err });
+                while (true) {} // Halt on error
+            };
+            self.page_bitfield.freePage(frame) catch |err| {
+                manager_log.warn("\nError freeing page at 0x{X:0>16}: {}", .{ last_page, err });
+                while (true) {} // Halt on error
+            };
+            manager_log.warn("-> 0x{X:0>16}\r", .{frame});
+            last_page = next;
+        }
+        manager_log.info("Memory mapper tester completed.", .{});
     }
 
     // Owned by the container!
@@ -342,12 +404,12 @@ const PageMapLevel4 = extern struct {
             }
             break :tester number_of_entries;
         };
-        manager_log.info("The number of directory pointers in map is {}",.{n_entries});
+        manager_log.info("The number of directory pointers in map is {}", .{n_entries});
         var iter = self.iterator();
         while (iter.next()) |entry| {
             const flags = PageFlags.from_bits(entry);
             if (flags.present) {
-                manager_log.info("{d:0>3}: 0x{X:0>16}", .{iter.index - 1, entry});
+                manager_log.info("{d:0>3}: 0x{X:0>16}", .{ iter.index - 1, entry });
             }
         }
     }
@@ -380,11 +442,8 @@ const PageMapLevel4 = extern struct {
                                     if (pt_flags.present) {
                                         const _phys_addr = pt_entry & PTE_ADDR_MASK;
                                         const _virt_addr = virtFromIndexs(pm4_iter.index - 1, pm3_iter.index - 1, pm2_iter.index - 1, pt_iter.index - 1);
-                                        manager_verbose_log.info("0x{X:0>16} -> 0x{X:0>16}", .{
-                                            _virt_addr, _phys_addr});
-                                        manager_verbose_log.info("PML4: {d}, PDPT: {d}, PD: {d}, PT: {d}", .{
-                                            pm4_iter.index - 1, pm3_iter.index - 1, pm2_iter.index - 1, pt_iter.index - 1
-                                        });
+                                        manager_verbose_log.info("0x{X:0>16} -> 0x{X:0>16}", .{ _virt_addr, _phys_addr });
+                                        manager_verbose_log.info("PML4: {d}, PDPT: {d}, PD: {d}, PT: {d}", .{ pm4_iter.index - 1, pm3_iter.index - 1, pm2_iter.index - 1, pt_iter.index - 1 });
                                     }
                                 }
                             }
@@ -393,7 +452,6 @@ const PageMapLevel4 = extern struct {
                 }
             }
         }
-
     }
 
     pub fn iterator(self: *PageMapLevel4) Iterator {
@@ -444,12 +502,12 @@ const PageDirectoryPointerTable = extern struct {
             }
             break :tester number_of_entries;
         };
-        manager_log.info("The number of directories in directory table is {}",.{n_entries});
+        manager_log.info("The number of directories in directory table is {}", .{n_entries});
         var iter = self.iterator();
         while (iter.next()) |entry| {
             const flags = PageFlags.from_bits(entry);
             if (flags.present) {
-                manager_log.info("{d:0>3}: 0x{X:0>16}", .{iter.index - 1, entry});
+                manager_log.info("{d:0>3}: 0x{X:0>16}", .{ iter.index - 1, entry });
             }
         }
     }
@@ -501,12 +559,12 @@ const PageDirectory = extern struct {
             }
             break :tester number_of_entries;
         };
-        manager_log.info("The number of tables in directory is {}",.{n_entries});
+        manager_log.info("The number of tables in directory is {}", .{n_entries});
         var iter = self.iterator();
         while (iter.next()) |entry| {
             const flags = PageFlags.from_bits(entry);
             if (flags.present) {
-                manager_log.info("{d:0>3}: 0x{X:0>16}", .{iter.index - 1, entry});
+                manager_log.info("{d:0>3}: 0x{X:0>16}", .{ iter.index - 1, entry });
             }
         }
     }
@@ -553,12 +611,12 @@ const PageTable = extern struct {
             }
             break :tester number_of_entries;
         };
-        manager_log.info("The number of entries in table is {}",.{n_entries});
+        manager_log.info("The number of entries in table is {}", .{n_entries});
         var iter = self.iterator();
         while (iter.next()) |entry| {
             const flags = PageFlags.from_bits(entry);
             if (flags.present) {
-                manager_log.info("{d:0>3}: 0x{X:0>16}", .{iter.index - 1, entry});
+                manager_log.info("{d:0>3}: 0x{X:0>16}", .{ iter.index - 1, entry });
             }
         }
     }
@@ -568,7 +626,6 @@ const PageTable = extern struct {
         _ = &ptr;
         return @ptrFromInt(ptr);
     }
-
 
     pub fn iterator(self: *PageTable) Iterator {
         return Iterator{ .pointer = self, .index = 0 };
@@ -596,7 +653,6 @@ const PageTable = extern struct {
             return null; // No more present entries
         }
     };
-
 };
 
 // Page Table Entry Flags (IA-32e, 64-bit mode)
@@ -654,7 +710,7 @@ pub fn virtFromIndexs(p4: usize, p3: usize, p2: usize, p1: usize) usize {
     const i2_: usize = @truncate(p2 & 0x1FF);
     const i1_: usize = @truncate(p1 & 0x1FF);
 
-    const header  = if (i4_ & 0x100 == 0) 0 else @as(u64,((@as(u64, 1) << (64 - 48)) - 1)) << 48; // Mask for 48-bit physical addresses
+    const header = if (i4_ & 0x100 == 0) 0 else @as(u64, ((@as(u64, 1) << (64 - 48)) - 1)) << 48; // Mask for 48-bit physical addresses
     return header | (i4_ << 39) | (i3_ << 30) | (i2_ << 21) | (i1_ << 12);
 }
 
@@ -665,6 +721,7 @@ pub const MapperError = error{
     AlreadyMapped,
     NotMapped,
     UnsupportedPageSize, // If trying to operate on large pages with functions not designed for them
+    NotInScratchMap,
 };
 
 /// Flags for mapping a page.
@@ -707,8 +764,7 @@ pub const PageFlags = struct {
     }
 
     pub fn log(self: PageFlags) void {
-        manager_log.debug("PageFlags: present={}, writable={}, user_accessible={}, write_through={}, cache_disable={}, global={}, execute_disable={}, demand_alloc={}",
-            .{self.present, self.writable, self.user_accessible, self.write_through, self.cache_disable, self.global, self.execute_disable, self.demand_alloc});
+        manager_log.debug("PageFlags: present={}, writable={}, user_accessible={}, write_through={}, cache_disable={}, global={}, execute_disable={}, demand_alloc={}", .{ self.present, self.writable, self.user_accessible, self.write_through, self.cache_disable, self.global, self.execute_disable, self.demand_alloc });
     }
 };
 
@@ -729,13 +785,15 @@ pub const Mapper = struct {
 
     /// Allocates a new, zeroed page table frame.
     inline fn allocate_page_table_frame(self: *Self) MapperError!u64 {
-        mapper_log.debug("Allocating frame", .{});
+        mapper_verbose_log.debug("Allocating frame", .{});
         const frame_phys_addr = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
 
         // Zero the frame using its virtual address
-        const frame_virt_ptr = getTableVirtPtr(frame_phys_addr, self.kernel_offset, [PAGE_TABLE_ENTRY_COUNT]u64);
-        for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
-            frame_virt_ptr[i] = 0;
+        const frame_virt_ptr = self.scratchMapVirt(frame_phys_addr, u8); //getTableVirtPtr(frame_phys_addr, self.kernel_offset, [PAGE_TABLE_ENTRY_COUNT]u64);
+        const framthing: [*]u8 = @ptrCast(frame_virt_ptr);
+        defer self.scratchMapDemap(frame_phys_addr);
+        for (0..4096) |i| {
+            framthing[i] = 0;
         }
         // @memset(@ptrCast(frame_virt_ptr), 0x00, PAGE_SIZE_4K);
         return frame_phys_addr;
@@ -849,7 +907,8 @@ pub const Mapper = struct {
         const pd_idx = pdIndex(virt_addr);
         const pt_idx = ptIndex(virt_addr);
 
-        const pml4_virt = getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
 
         // Flags for intermediate directory entries pointing to other tables.
         // They should be writable if any underlying page is writable,
@@ -864,33 +923,36 @@ pub const Mapper = struct {
             &pml4_virt.entries[pml4_idx],
             table_entry_flags,
         );
-        const pdpt_virt = getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable); //getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        defer self.scratchMapDemap(pdpt_phys_addr);
 
         // 2. PDPT -> PD
         const pd_phys_addr = try self.get_or_create_next_table(
             &pdpt_virt.entries[pdpt_idx],
             table_entry_flags,
         );
-        const pd_virt = getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        const pd_virt = self.scratchMapVirt(pd_phys_addr, PageDirectory); //getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        defer self.scratchMapDemap(pd_phys_addr);
 
         // 3. PD -> PT
         const pt_phys_addr = try self.get_or_create_next_table(
             &pd_virt.entries[pd_idx],
             table_entry_flags,
         );
-        const pt_virt = getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        const pt_virt = self.scratchMapVirt(pt_phys_addr, PageTable); // getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        defer self.scratchMapDemap(pt_phys_addr);
 
         // 4. Set PTE in PT
         const pte_ptr = &pt_virt.entries[pt_idx];
         if (pte_ptr.* & PT_PRESENT != 0) {
             // Page is already mapped. For simplicity, we'll overwrite.
             // A more robust VMM might error or require unmap first.
-            manager_log.warn("map: virt_addr 0x{x} already mapped to 0x{x}. Overwriting with 0x{x}.", .{
+            manager_log.warn("map: virt_addr 0x{x} already mapped to 0x{x}. Overwriting with 0x{x}.\n", .{
                 virt_addr, pte_ptr.* & PTE_ADDR_MASK, phys_addr,
             });
         }
 
-        mapper_verbose_log.info("mapped (allocated) virt 0x{X:0>16} -> 0x{X:0>16}",.{virt_addr,phys_addr});
+        mapper_verbose_log.info("mapped (allocated) virt 0x{X:0>16} -> 0x{X:0>16}", .{ virt_addr, phys_addr });
         pte_ptr.* = phys_addr | page_flags.to_bits();
         invlpg(virt_addr);
     }
@@ -902,33 +964,32 @@ pub const Mapper = struct {
         page_flags: PageFlags,
     ) !void {
         if (start_virt_addr & PAGE_MASK_4K != 0 or end_virt_addr & PAGE_MASK_4K != 0) {
-            mapper_log.err("mapDemandRange: start_virt_addr 0x{x} or end_virt_addr 0x{x} not 4K aligned.", .{start_virt_addr, end_virt_addr});
+            mapper_log.err("mapDemandRange: start_virt_addr 0x{x} or end_virt_addr 0x{x} not 4K aligned.", .{ start_virt_addr, end_virt_addr });
             return MapperError.AddressNotAligned;
         }
-        mapper_log.debug("mapDemandRange: start_virt_addr 0x{x}, end_virt_addr 0x{x}, page_flags: {any}", .{start_virt_addr, end_virt_addr, page_flags});
+        mapper_log.debug("mapDemandRange: start_virt_addr 0x{x}, end_virt_addr 0x{x}, page_flags: {any}", .{ start_virt_addr, end_virt_addr, page_flags });
 
         if (start_virt_addr >= end_virt_addr) {
-            mapper_log.err("mapDemandRange: start address 0x{x} is not less than end address 0x{x}.", .{start_virt_addr, end_virt_addr});
+            mapper_log.err("mapDemandRange: start address 0x{x} is not less than end address 0x{x}.", .{ start_virt_addr, end_virt_addr });
             return; // No range to map
         }
 
         // check if the range is already mapped
         // using the translate function
         var current_virt = start_virt_addr;
-        while(current_virt <= end_virt_addr) {
+        while (current_virt <= end_virt_addr) {
             if (self.translate(current_virt)) |phys_addr| {
-                mapper_log.warn("mapDemandRange: virt_addr 0x{x} already mapped to 0x{x}.", .{current_virt, phys_addr});
+                mapper_log.warn("mapDemandRange: virt_addr 0x{x} already mapped to 0x{x}.\n", .{ current_virt, phys_addr });
                 return MapperError.AlreadyMapped;
             }
             current_virt += PAGE_SIZE_4K;
         }
 
-
         current_virt = start_virt_addr;
         while (current_virt <= end_virt_addr) {
             // allocate a page
             const phys_addr = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
-            try self.map(current_virt,phys_addr, page_flags);
+            try self.map(current_virt, phys_addr, page_flags);
             current_virt += PAGE_SIZE_4K;
         }
         return; // Successfully mapped the range
@@ -941,7 +1002,6 @@ pub const Mapper = struct {
         size: u64,
         page_flags: PageFlags,
     ) !bool {
-
         const page_count = (size + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
         var current_addr = virt_addr & ~PAGE_MASK_4K;
 
@@ -971,7 +1031,8 @@ pub const Mapper = struct {
         const pd_idx = pdIndex(virt_addr);
         const pt_idx = ptIndex(virt_addr);
 
-        const pml4_virt = getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
 
         // Flags for intermediate directory entries
         var table_entry_flags = PT_PRESENT;
@@ -983,37 +1044,40 @@ pub const Mapper = struct {
             &pml4_virt.entries[pml4_idx],
             table_entry_flags,
         );
-        const pdpt_virt = getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
-        mapper_verbose_log.debug("mapDemand: PDPT created at 0x{x} for virt_addr 0x{x}", .{pdpt_phys_addr, virt_addr});
+        const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable); //getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        defer self.scratchMapDemap(pdpt_phys_addr);
+        mapper_verbose_log.debug("mapDemand: PDPT created at 0x{x} for virt_addr 0x{x}", .{ pdpt_phys_addr, virt_addr });
 
         // 2. PDPT -> PD
         const pd_phys_addr = try self.get_or_create_next_table(
             &pdpt_virt.entries[pdpt_idx],
             table_entry_flags,
         );
-        const pd_virt = getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
-        mapper_verbose_log.debug("mapDemand: PD created at 0x{x} for virt_addr 0x{x}", .{pd_phys_addr, virt_addr});
+        const pd_virt = self.scratchMapVirt(pd_phys_addr, PageDirectory); //getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        defer self.scratchMapDemap(pd_phys_addr);
+        mapper_verbose_log.debug("mapDemand: PD created at 0x{x} for virt_addr 0x{x}", .{ pd_phys_addr, virt_addr });
 
         // 3. PD -> PT
         const pt_phys_addr = try self.get_or_create_next_table(
             &pd_virt.entries[pd_idx],
             table_entry_flags,
         );
-        const pt_virt = getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
-        mapper_verbose_log.debug("mapDemand: PT created at 0x{x} for virt_addr 0x{x}", .{pt_phys_addr, virt_addr});
+        const pt_virt = self.scratchMapVirt(pt_phys_addr, PageTable); // getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        defer self.scratchMapDemap(pt_phys_addr);
+        mapper_verbose_log.debug("mapDemand: PT created at 0x{x} for virt_addr 0x{x}", .{ pt_phys_addr, virt_addr });
 
         // 4. Set PTE for demand allocation
         const pte_ptr = &pt_virt.entries[pt_idx];
         if (pte_ptr.* & PT_PRESENT != 0) {
-            mapper_log.warn("mapDemand: virt_addr 0x{x} already mapped.", .{virt_addr});
+            mapper_log.warn("mapDemand: virt_addr 0x{x} already mapped.\n", .{virt_addr});
             return MapperError.AlreadyMapped;
         }
         mapper_verbose_log.debug("mapDemand: Setting PTE for virt_addr 0x{x}", .{virt_addr});
 
         // Create flags with demand bit set and present bit clear
         var demand_flags = page_flags;
-        demand_flags.present = false;  // Not present initially
-        demand_flags.demand_alloc = true;  // Mark for demand allocation
+        demand_flags.present = false; // Not present initially
+        demand_flags.demand_alloc = true; // Mark for demand allocation
 
         // Set PTE with demand flags and zero physical address
         pte_ptr.* = demand_flags.to_bits();
@@ -1025,16 +1089,13 @@ pub const Mapper = struct {
 
     /// Allocate a page frame for a page fault (MMU_pf_alloc equivalent)
     pub fn allocatePageForFault(self: *Self, virt_addr: u64) MapperError!u64 {
-        mapper_log.debug("allocatePageForFault: Allocating page for fault at virt_addr 0x{x}", .{virt_addr});
+        mapper_verbose_log.debug("allocatePageForFault: Allocating page for fault at virt_addr 0x{x}", .{virt_addr});
         const phys_addr = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
 
-        const rsp = asm volatile ("mov %%rsp, %[result]"
-            : [result] "=r" (-> u64)
-        );
-        std.log.err("RSP : 0x{X:0>16}", .{rsp});
         // Zero the allocated page
-        const page_virt_ptr = getTableVirtPtr(phys_addr, self.kernel_offset, [PAGE_SIZE_4K]u8);
-        @memset(page_virt_ptr, 0);
+        const page_virt_ptr = self.scratchMapVirt(phys_addr, PageTable); //getTableVirtPtr(phys_addr, self.kernel_offset, [PAGE_SIZE_4K]u8);
+        defer self.scratchMapDemap(phys_addr);
+        @memset(&page_virt_ptr.entries, 0);
 
         mapper_verbose_log.debug("Allocated page frame 0x{x} for fault at virt 0x{x}", .{ phys_addr, virt_addr });
         return phys_addr;
@@ -1049,7 +1110,8 @@ pub const Mapper = struct {
         const pd_idx = pdIndex(page_aligned_virt);
         const pt_idx = ptIndex(page_aligned_virt);
 
-        const pml4_virt = getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
 
         // Walk page tables to find the PTE
         const pml4e_val = pml4_virt.entries[pml4_idx];
@@ -1057,7 +1119,8 @@ pub const Mapper = struct {
         if (pml4e_val & PT_PRESENT == 0) return false;
 
         const pdpt_phys_addr = pml4e_val & PTE_ADDR_MASK;
-        const pdpt_virt = getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable); //getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        defer self.scratchMapDemap(pdpt_phys_addr);
         // pdpt_virt.deVoltaile().log();
 
         const pdpte_val = pdpt_virt.entries[pdpt_idx];
@@ -1065,7 +1128,8 @@ pub const Mapper = struct {
         if (pdpte_val & PT_PAGE_SIZE != 0) return false; // Large page
 
         const pd_phys_addr = pdpte_val & PTE_ADDR_MASK;
-        const pd_virt = getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        const pd_virt = self.scratchMapVirt(pd_phys_addr, PageDirectory); //getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        defer self.scratchMapDemap(pd_phys_addr);
         // pd_virt.deVoltaile().log();
 
         const pde_val = pd_virt.entries[pd_idx];
@@ -1073,7 +1137,8 @@ pub const Mapper = struct {
         if (pde_val & PT_PAGE_SIZE != 0) return false; // Large page
 
         const pt_phys_addr = pde_val & PTE_ADDR_MASK;
-        const pt_virt = getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        const pt_virt = self.scratchMapVirt(pt_phys_addr, PageTable); // getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        defer self.scratchMapDemap(pt_phys_addr);
         // pt_virt.deVoltaile().log();
 
         const pte_ptr = &pt_virt.entries[pt_idx];
@@ -1091,7 +1156,7 @@ pub const Mapper = struct {
         }
 
         // Allocate physical page
-        std.log.info("Handling demand page fault for virt 0x{X:0>16}", .{page_aligned_virt});
+        // std.log.info("Handling demand page fault for virt 0x{X:0>16}", .{page_aligned_virt});
         const phys_addr = try self.allocatePageForFault(page_aligned_virt);
 
         // Update PTE: clear demand bit, set present bit, set physical address
@@ -1102,67 +1167,469 @@ pub const Mapper = struct {
         new_flags.demand_alloc = false;
         new_flags.execute_disable = false; // Set execute-disable for security
 
-        mapper_verbose_log.debug("Allocating page for demand fault: virt 0x{X:0>16} -> phys 0x{X:0>16}",
-            .{ page_aligned_virt, phys_addr });
+        mapper_verbose_log.debug("Allocating page for demand fault: virt 0x{X:0>16} -> phys 0x{X:0>16}", .{ page_aligned_virt, phys_addr });
 
         pte_ptr.* = phys_addr | new_flags.to_bits();
 
         invlpg(page_aligned_virt);
 
-        mapper_verbose_log.info("Demand allocated: virt 0x{X:0>16} -> phys 0x{X:0>16}",
-                       .{ page_aligned_virt, phys_addr });
+        mapper_verbose_log.info("Demand allocated: virt 0x{X:0>16} -> phys 0x{X:0>16}", .{ page_aligned_virt, phys_addr });
 
         invlpg(page_aligned_virt);
         invlpg(@intFromPtr(pt_virt));
         return true;
     }
 
-    /// Unmaps a 4KB virtual page.
-    /// `virt_addr` must be 4KB aligned.
-    /// Note: This version does not free underlying page table frames if they become empty.
-    pub fn unmap(self: *Self, virt_addr: u64) MapperError!void {
+    pub fn isTablePhysicallyEmpty(
+        table_phys_addr: u64,
+        comptime TableStruct: type,
+        mapper: *Mapper,
+    ) bool {
+        const table_virt = mapper.scratchMapVirt(table_phys_addr, TableStruct);
+        defer mapper.scratchMapDemap(table_phys_addr);
+        for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
+            if ((table_virt.entries[i] & PT_PRESENT) != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn unmapAndFreeRangeFull(
+        self: *Self,
+        range_start_virt: u64,
+        range_end_virt: u64, // exclusive end
+    ) !void {
+        if (range_start_virt & PAGE_MASK_4K != 0 or
+            range_end_virt & PAGE_MASK_4K != 0)
+        {
+            mapper_log.err(
+                "unmapAndFreeRangeFull: start_virt 0x{x} or end_virt 0x{x} not 4K aligned.",
+                .{ range_start_virt, range_end_virt },
+            );
+            return MapperError.AddressNotAligned;
+        }
+        if (range_start_virt >= range_end_virt) {
+            mapper_log.debug(
+                "unmapAndFreeRangeFull: start_virt 0x{x} >= end_virt 0x{x}, nothing to do.",
+                .{ range_start_virt, range_end_virt },
+            );
+            return;
+        }
+
+        // Step 1: Unmap individual pages and free their physical frames
+        try self.unmapAndFreeRange(range_start_virt, range_end_virt);
+        mapper_verbose_log.debug(
+            "unmapAndFreeRangeFull: Pages unmapped for range 0x{x}-0x{x}. Starting table cleanup.",
+            .{ range_start_virt, range_end_virt },
+        );
+
+        // --- Pass 1: Clean Page Tables (PTs) ---
+        // Iterate through Page Directory regions (2MB chunks) that overlap with the range
+        var current_pd_region_addr = range_start_virt & ~PAGE_MASK_2MB;
+        while (current_pd_region_addr < range_end_virt) {
+            const pml4_idx_for_pd = pml4Index(current_pd_region_addr);
+            const pdpt_idx_for_pd = pdptIndex(current_pd_region_addr);
+
+            const pml4_virt = self.scratchMapVirt(
+                self.pml4_phys_addr,
+                PageMapLevel4,
+            );
+            defer self.scratchMapDemap(self.pml4_phys_addr);
+            const pml4e = pml4_virt.entries[pml4_idx_for_pd];
+
+            if (pml4e & PT_PRESENT == 0) {
+                current_pd_region_addr = (current_pd_region_addr + PAGE_SIZE_1GB) &
+                    ~PAGE_MASK_1GB;
+                if (current_pd_region_addr < (range_start_virt & ~PAGE_MASK_2MB)) { // Ensure forward progress
+                    current_pd_region_addr = range_start_virt & ~PAGE_MASK_2MB;
+                }
+                continue;
+            }
+            const pdpt_phys = pml4e & PTE_ADDR_MASK;
+
+            const pdpt_virt = self.scratchMapVirt(
+                pdpt_phys,
+                PageDirectoryPointerTable,
+            );
+            const pdpte = pdpt_virt.entries[pdpt_idx_for_pd];
+            // Demap pdpt_virt later, after potential modification if its child PD is freed
+
+            if (pdpte & PT_PRESENT == 0) {
+                self.scratchMapDemap(pdpt_phys);
+                current_pd_region_addr += PAGE_SIZE_2MB;
+                continue;
+            }
+            if (pdpte & PT_PAGE_SIZE != 0) { // 1GB page
+                self.scratchMapDemap(pdpt_phys);
+                current_pd_region_addr = (current_pd_region_addr + PAGE_SIZE_1GB) &
+                    ~PAGE_MASK_1GB;
+                if (current_pd_region_addr < (range_start_virt & ~PAGE_MASK_2MB)) {
+                    current_pd_region_addr = range_start_virt & ~PAGE_MASK_2MB;
+                }
+                continue;
+            }
+            const pd_phys = pdpte & PTE_ADDR_MASK;
+            var pd_virt = self.scratchMapVirt(pd_phys, PageDirectory);
+
+            // Iterate over PDEs in the current PD
+            for (0..PAGE_TABLE_ENTRY_COUNT) |pt_idx_in_pd| {
+                const pde_ptr = &pd_virt.entries[pt_idx_in_pd];
+                if (pde_ptr.* & PT_PRESENT == 0) continue;
+                if (pde_ptr.* & PT_PAGE_SIZE != 0) continue; // 2MB page
+
+                const pt_phys_addr = pde_ptr.* & PTE_ADDR_MASK;
+                if (isTablePhysicallyEmpty(pt_phys_addr, PageTable, self)) {
+                    mapper_verbose_log.debug(
+                        "unmapAndFreeRangeFull: PT @0x{x} (PDE @{*} entry {}) is empty. Freeing.",
+                        .{ pt_phys_addr, pde_ptr, pt_idx_in_pd },
+                    );
+                    try self.free_page_table_frame(pt_phys_addr);
+                    pde_ptr.* = 0; // Clear the PDE
+                }
+            }
+            self.scratchMapDemap(pd_phys); // Demap PD after iterating its PDEs
+            self.scratchMapDemap(pdpt_phys); // Demap PDPT (was mapped before PD)
+            current_pd_region_addr += PAGE_SIZE_2MB;
+        }
+
+        // --- Pass 2: Clean Page Directories (PDs) ---
+        // Iterate through Page Directory Pointer Table regions (1GB chunks)
+        var current_pdpt_region_addr = range_start_virt & ~PAGE_MASK_1GB;
+        while (current_pdpt_region_addr < range_end_virt) {
+            const pml4_idx_for_pdpt = pml4Index(current_pdpt_region_addr);
+
+            var pml4_virt_pd = self.scratchMapVirt(
+                self.pml4_phys_addr,
+                PageMapLevel4,
+            );
+            const pml4e_ptr_pd = &pml4_virt_pd.entries[pml4_idx_for_pdpt];
+
+            if (pml4e_ptr_pd.* & PT_PRESENT == 0) {
+                self.scratchMapDemap(self.pml4_phys_addr);
+                current_pdpt_region_addr = (current_pdpt_region_addr +
+                    PAGE_SIZE_1GB * PAGE_TABLE_ENTRY_COUNT) &
+                    ~(PAGE_SIZE_1GB * PAGE_TABLE_ENTRY_COUNT - 1); // Align to next PML4E coverage
+                if (current_pdpt_region_addr < (range_start_virt & ~PAGE_MASK_1GB)) {
+                    current_pdpt_region_addr = range_start_virt & ~PAGE_MASK_1GB;
+                }
+                continue;
+            }
+            const pdpt_phys_addr_pd = pml4e_ptr_pd.* & PTE_ADDR_MASK;
+            var pdpt_virt_pd = self.scratchMapVirt(
+                pdpt_phys_addr_pd,
+                PageDirectoryPointerTable,
+            );
+
+            // Iterate over PDPTEs in the current PDPT
+            for (0..PAGE_TABLE_ENTRY_COUNT) |pd_idx_in_pdpt| {
+                const pdpte_ptr = &pdpt_virt_pd.entries[pd_idx_in_pdpt];
+                if (pdpte_ptr.* & PT_PRESENT == 0) continue;
+                if (pdpte_ptr.* & PT_PAGE_SIZE != 0) continue; // 1GB page
+
+                const pd_phys_addr = pdpte_ptr.* & PTE_ADDR_MASK;
+                if (isTablePhysicallyEmpty(pd_phys_addr, PageDirectory, self)) {
+                    mapper_verbose_log.debug(
+                        "unmapAndFreeRangeFull: PD @0x{x} (PDPTE @{*} entry {}) is empty. Freeing.",
+                        .{ pd_phys_addr, pdpte_ptr, pd_idx_in_pdpt },
+                    );
+                    try self.free_page_table_frame(pd_phys_addr);
+                    pdpte_ptr.* = 0; // Clear the PDPTE
+                }
+            }
+            self.scratchMapDemap(pdpt_phys_addr_pd);
+            self.scratchMapDemap(self.pml4_phys_addr);
+            current_pdpt_region_addr += PAGE_SIZE_1GB;
+        }
+
+        // --- Pass 3: Clean Page Directory Pointer Tables (PDPTs) ---
+        // Iterate through PML4E regions that cover the range.
+        // A single PML4E covers 512GB. The range is usually smaller.
+        // We find unique PML4 indices covering the start and end of the range.
+        const start_pml4_idx = pml4Index(range_start_virt);
+        const end_pml4_idx = pml4Index(range_end_virt - 1); // -1 for inclusive end for index calc
+
+        for (start_pml4_idx..(end_pml4_idx + 1)) |pml4_idx_for_cleanup| {
+            var pml4_virt_cleanup = self.scratchMapVirt(
+                self.pml4_phys_addr,
+                PageMapLevel4,
+            );
+            const pml4e_ptr_cleanup = &pml4_virt_cleanup.entries[pml4_idx_for_cleanup];
+
+            if (pml4e_ptr_cleanup.* & PT_PRESENT == 0) {
+                self.scratchMapDemap(self.pml4_phys_addr);
+                continue;
+            }
+            // PML4Es should not have PS bit set when pointing to PDPT
+            // std.debug.assert((pml4e_ptr_cleanup.* & PT_PAGE_SIZE) == 0);
+
+            const pdpt_phys_addr_cleanup = pml4e_ptr_cleanup.* & PTE_ADDR_MASK;
+            if (isTablePhysicallyEmpty(
+                pdpt_phys_addr_cleanup,
+                PageDirectoryPointerTable,
+                self,
+            )) {
+                mapper_verbose_log.debug(
+                    "unmapAndFreeRangeFull: PDPT @0x{x} (PML4E @{*} entry {}) is empty. Freeing.",
+                    .{
+                        pdpt_phys_addr_cleanup,
+                        pml4e_ptr_cleanup,
+                        pml4_idx_for_cleanup,
+                    },
+                );
+                try self.free_page_table_frame(pdpt_phys_addr_cleanup);
+                pml4e_ptr_cleanup.* = 0; // Clear the PML4E
+            }
+            self.scratchMapDemap(self.pml4_phys_addr);
+        }
+
+        mapper_verbose_log.debug(
+            "unmapAndFreeRangeFull: Table cleanup finished for range 0x{x}-0x{x}.",
+            .{ range_start_virt, range_end_virt },
+        );
+    }
+
+    pub fn getpageDirectoryPointerPhys(self: *Self, virt_addr: u64) MapperError!u64 {
         if (virt_addr & PAGE_MASK_4K != 0) {
-            mapper_log.err("unmap: virt_addr 0x{x} not 4K aligned.", .{virt_addr});
+            mapper_log.err("getPageDirectoryPointer: virt_addr 0x{x} not 4K aligned.", .{virt_addr});
             return MapperError.AddressNotAligned;
         }
 
         const pml4_idx = pml4Index(virt_addr);
-        const pdpt_idx = pdptIndex(virt_addr);
-        const pd_idx = pdIndex(virt_addr);
-        const pt_idx = ptIndex(virt_addr);
 
-        const pml4_virt = getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
 
         // 1. PML4 Entry
         const pml4e_val = pml4_virt.entries[pml4_idx];
         if (pml4e_val & PT_PRESENT == 0) return MapperError.NotMapped;
         if (pml4e_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // Should be table
         const pdpt_phys_addr = pml4e_val & PTE_ADDR_MASK;
-        const pdpt_virt = getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        return pdpt_phys_addr;
+    }
+
+    pub fn getPageDirectoryPhys(self: *Self, virt_addr: u64) MapperError!u64 {
+        if (virt_addr & PAGE_MASK_4K != 0) {
+            mapper_log.err("getPageDirectory: virt_addr 0x{x} not 4K aligned.", .{virt_addr});
+            return MapperError.AddressNotAligned;
+        }
+
+        const pml4_idx = pml4Index(virt_addr);
+        const pdpt_idx = pdptIndex(virt_addr);
+
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
+
+        // 1. PML4 Entry
+        const pml4e_val = pml4_virt.entries[pml4_idx];
+        if (pml4e_val & PT_PRESENT == 0) return MapperError.NotMapped;
+        if (pml4e_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // Should be table
+        const pdpt_phys_addr = pml4e_val & PTE_ADDR_MASK;
+        const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable); //getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        defer self.scratchMapDemap(pdpt_phys_addr);
 
         // 2. PDPT Entry
         const pdpte_val = pdpt_virt.entries[pdpt_idx];
         if (pdpte_val & PT_PRESENT == 0) return MapperError.NotMapped;
         if (pdpte_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // No 1GB pages here
         const pd_phys_addr = pdpte_val & PTE_ADDR_MASK;
-        const pd_virt = getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        return pd_phys_addr;
+    }
+
+    pub fn getPageTablePhys(self: *Self, virt_addr: u64) MapperError!u64 {
+        if (virt_addr & PAGE_MASK_4K != 0) {
+            mapper_log.err("getPageTable: virt_addr 0x{x} not 4K aligned.", .{virt_addr});
+            return MapperError.AddressNotAligned;
+        }
+
+        const pml4_idx = pml4Index(virt_addr);
+        const pdpt_idx = pdptIndex(virt_addr);
+        const pd_idx = pdIndex(virt_addr);
+
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
+
+        // 1. PML4 Entry
+        const pml4e_val = pml4_virt.entries[pml4_idx];
+        if (pml4e_val & PT_PRESENT == 0) return MapperError.NotMapped;
+        if (pml4e_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // Should be table
+        const pdpt_phys_addr = pml4e_val & PTE_ADDR_MASK;
+        const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable); //getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        defer self.scratchMapDemap(pdpt_phys_addr);
+
+        // 2. PDPT Entry
+        const pdpte_val = pdpt_virt.entries[pdpt_idx];
+        if (pdpte_val & PT_PRESENT == 0) return MapperError.NotMapped;
+        if (pdpte_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // No 1GB pages here
+        const pd_phys_addr = pdpte_val & PTE_ADDR_MASK;
+        const pd_virt = self.scratchMapVirt(pd_phys_addr, PageDirectory); //getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        defer self.scratchMapDemap(pd_phys_addr);
 
         // 3. PD Entry
         const pde_val = pd_virt.entries[pd_idx];
         if (pde_val & PT_PRESENT == 0) return MapperError.NotMapped;
         if (pde_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // No 2MB pages here
         const pt_phys_addr = pde_val & PTE_ADDR_MASK;
-        const pt_virt = getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        return pt_phys_addr;
+    }
+
+    pub fn unmapAndFreeRange(
+        self: *Self,
+        start_virt_addr: u64,
+        end_virt_addr: u64,
+    ) !void {
+        if (start_virt_addr & PAGE_MASK_4K != 0 or end_virt_addr & PAGE_MASK_4K != 0) {
+            mapper_log.err("unmapAndFreeRange: start_virt_addr 0x{x} or end_virt_addr 0x{x} not 4K aligned.", .{ start_virt_addr, end_virt_addr });
+            return MapperError.AddressNotAligned;
+        }
+        mapper_log.debug("unmapAndFreeRange: start_virt_addr 0x{x}, end_virt_addr 0x{x}", .{ start_virt_addr, end_virt_addr });
+
+        var current_virt = start_virt_addr;
+        var i: u64 = 0;
+        while (current_virt < end_virt_addr) :  (i += 1){
+            const result = self.unmap(current_virt) catch |err| {
+                switch (err) {
+                    MapperError.NotMapped => {
+                        if (i & 0x3ff == 0) mapper_log.warn("unmapAndFreeRange: ~virt_addr 0x{x} not mapped. continuing...\r", .{current_virt});
+                        current_virt += PAGE_SIZE_4K;
+                        continue; // Not mapped, continue to next address
+                        // return MapperError.NotMapped;
+                    },
+                    MapperError.AddressNotAligned => {
+                        mapper_log.err("unmapAndFreeRange: virt_addr 0x{x} not 4K aligned.", .{current_virt});
+                        return err; // Address not aligned error
+                    },
+                    MapperError.UnsupportedPageSize => {
+                        mapper_log.err("unmapAndFreeRange: virt_addr 0x{x} has unsupported page size.", .{current_virt});
+                        return err; // Unsupported page size error
+                    },
+                    else => {},
+                }
+                mapper_log.err("unmapAndFreeRange: Failed to unmap virt_addr 0x{x}: {}", .{ current_virt, err });
+                return err; // Propagate the error
+            };
+            self.free_page_table_frame(result) catch |err| {
+                mapper_log.err("unmapAndFreeRange: Failed to free page frame 0x{x}: {}", .{ result, err });
+                return err; // Propagate the error
+            };
+            mapper_verbose_log.info("Unmapped and freed virt 0x{X:0>16}", .{current_virt});
+            current_virt += PAGE_SIZE_4K;
+        }
+
+         mapper_log.warn("\n",.{});
+    }
+
+    /// Unmaps a 4KB virtual page.
+    /// `virt_addr` must be 4KB aligned.
+    /// Note: This version does not free underlying page table frames if they become empty.
+    pub fn unmap(self: *Self, virt_addr: u64) MapperError!u64 {
+        if (virt_addr & PAGE_MASK_4K != 0) {
+            mapper_log.err("unmap: virt_addr 0x{x} not 4K aligned.", .{virt_addr});
+            return MapperError.AddressNotAligned;
+        }
+        // mapper_log.debug("unmap: Unmapping virt_addr 0x{x}", .{virt_addr});
+
+        const pml4_idx = pml4Index(virt_addr);
+        const pdpt_idx = pdptIndex(virt_addr);
+        const pd_idx = pdIndex(virt_addr);
+        const pt_idx = ptIndex(virt_addr);
+
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
+
+        // 1. PML4 Entry
+        const pml4e_val = pml4_virt.entries[pml4_idx];
+        if (pml4e_val & PT_PRESENT == 0) return MapperError.NotMapped;
+        if (pml4e_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // Should be table
+        const pdpt_phys_addr = pml4e_val & PTE_ADDR_MASK;
+        const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable); //getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        defer self.scratchMapDemap(pdpt_phys_addr);
+
+        // 2. PDPT Entry
+        const pdpte_val = pdpt_virt.entries[pdpt_idx];
+        if (pdpte_val & PT_PRESENT == 0) return MapperError.NotMapped;
+        if (pdpte_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // No 1GB pages here
+        const pd_phys_addr = pdpte_val & PTE_ADDR_MASK;
+        const pd_virt = self.scratchMapVirt(pd_phys_addr, PageDirectory); //getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        defer self.scratchMapDemap(pd_phys_addr);
+
+        // 3. PD Entry
+        const pde_val = pd_virt.entries[pd_idx];
+        if (pde_val & PT_PRESENT == 0) return MapperError.NotMapped;
+        if (pde_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize; // No 2MB pages here
+        const pt_phys_addr = pde_val & PTE_ADDR_MASK;
+        const pt_virt = self.scratchMapVirt(pt_phys_addr, PageTable); // getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        defer self.scratchMapDemap(pt_phys_addr);
 
         // 4. PT Entry (PTE)
         const pte_ptr = &pt_virt.entries[pt_idx];
+
         if (pte_ptr.* & PT_PRESENT == 0) return MapperError.NotMapped;
 
+        const result: usize = pte_ptr.* & PTE_ADDR_MASK;
         pte_ptr.* = 0; // Clear the entry (mark as not present)
         invlpg(virt_addr);
+        return result;
 
         // TODO: Implement freeing of page table frames if they become empty.
         // This requires checking all entries in pt_virt, pd_virt, pdpt_virt.
+    }
+
+    pub fn initScratchMap(kernel_offset: u64) !void {
+        const virt_addr = types.MEMORY_LAYOUT.KERNEL_VIRTUAL_SCRATCH_START;
+        const pml4_idx = pml4Index(virt_addr);
+        const pdpt_idx = pdptIndex(virt_addr);
+        const pd_idx = pdIndex(virt_addr);
+
+        const pml4_virt = getTableVirtPtr(currentPML4(), kernel_offset, PageMapLevel4);
+        const pml4e_val = pml4_virt.entries[pml4_idx];
+        std.log.debug("PML4E at index {}: 0x{X:0>16}", .{ pml4_idx, pml4e_val });
+
+        if (pml4e_val & PT_PRESENT == 0) {
+            pml4_virt.entries[pml4_idx] = @as(u64, @intFromPtr(&scratch_pdpt) - kernel_offset) | PT_PRESENT;
+        }
+        std.log.debug("-> PML4E at index {}: 0x{X:0>16}", .{ pml4_idx, pml4_virt.entries[pml4_idx] });
+
+        const pdpt_phys_addr = pml4_virt.entries[pml4_idx] & PTE_ADDR_MASK;
+        const pdpt_virt = getTableVirtPtr(pdpt_phys_addr, kernel_offset, PageDirectoryPointerTable);
+        const pdpte_val = pdpt_virt.entries[pdpt_idx];
+        std.log.debug("PDPTE at index {}: 0x{X:0>16}", .{ pdpt_idx, pdpte_val });
+
+        if (pdpte_val & PT_PRESENT == 0) {
+            pdpt_virt.entries[pdpt_idx] = @as(u64, @intFromPtr(&scratch_pd) - kernel_offset) | PT_PRESENT;
+        }
+        std.log.debug("-> PDPTE at index {}: 0x{X:0>16}", .{ pdpt_idx, pdpt_virt.entries[pdpt_idx] });
+
+        const pd_phys_addr = pdpt_virt.entries[pdpt_idx] & PTE_ADDR_MASK;
+        const pd_virt = getTableVirtPtr(pd_phys_addr, kernel_offset, PageDirectory);
+        pd_virt.entries[pd_idx] = @as(u64, @intFromPtr(&scratch_pt) - kernel_offset) | PT_PRESENT;
+        std.log.debug("PDE at index {}: 0x{X:0>16}", .{ pd_idx, pd_virt.entries[pd_idx] });
+    }
+
+    pub fn scratchMapVirt(self: *Self, phys_addr: u64, comptime return_type: type) *return_type {
+        _ = self;
+        for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
+            if (scratch_pt.entries[i] & PT_PRESENT == 0) {
+                // we've found the entry that we're going to write to / we will use
+                scratch_pt.entries[i] = phys_addr & PTE_ADDR_MASK | PT_PRESENT | PT_WRITABLE;
+                // std.log.debug("scratchMapVirt: Mapping physical address 0x{X:0>16} to virtual index {} in scratch map", .{phys_addr, i});
+                invlpg(types.MEMORY_LAYOUT.KERNEL_VIRTUAL_SCRATCH_START + (i * PAGE_SIZE_4K));
+                return @ptrFromInt(types.MEMORY_LAYOUT.KERNEL_VIRTUAL_SCRATCH_START + (i * PAGE_SIZE_4K));
+            }
+        }
+        @panic("scratchMapVirt: No free entry in scratch map");
+    }
+
+    pub fn scratchMapDemap(self: *Self, phys_addr: u64) void {
+        _ = self;
+        for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
+            if (scratch_pt.entries[i] & PTE_ADDR_MASK == phys_addr & PTE_ADDR_MASK) {
+                scratch_pt.entries[i] = 0;
+                invlpg(types.MEMORY_LAYOUT.KERNEL_VIRTUAL_SCRATCH_START + (i * PAGE_SIZE_4K));
+                return;
+            }
+        }
+        @panic("scratchMapDemap: Address not found in scratch map");
     }
 
     /// Translates a virtual address to its corresponding physical address.
@@ -1175,7 +1642,8 @@ pub const Mapper = struct {
         const pt_idx = ptIndex(virt_addr);
         const page_offset = virt_addr & PAGE_MASK_4K;
 
-        const pml4_virt = getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4); //getTableVirtPtr(self.pml4_phys_addr, self.kernel_offset, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
         mapper_translate_log.debug("Virtual address of pml4 is {*}", .{pml4_virt});
 
         // 1. PML4 Entry
@@ -1187,7 +1655,8 @@ pub const Mapper = struct {
             return null;
         }
         const pdpt_phys_addr = pml4e_val & PTE_ADDR_MASK;
-        const pdpt_virt = getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable); //getTableVirtPtr(pdpt_phys_addr, self.kernel_offset, PageDirectoryPointerTable);
+        defer self.scratchMapDemap(pdpt_phys_addr);
 
         // 2. PDPT Entry
         const pdpte_val = pdpt_virt.entries[pdpt_idx];
@@ -1197,7 +1666,8 @@ pub const Mapper = struct {
             return frame_1gb_addr + (virt_addr & PAGE_MASK_1GB);
         }
         const pd_phys_addr = pdpte_val & PTE_ADDR_MASK;
-        const pd_virt = getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        const pd_virt = self.scratchMapVirt(pd_phys_addr, PageDirectory); //getTableVirtPtr(pd_phys_addr, self.kernel_offset, PageDirectory);
+        defer self.scratchMapDemap(pd_phys_addr);
 
         // 3. PD Entry
         const pde_val = pd_virt.entries[pd_idx];
@@ -1207,7 +1677,8 @@ pub const Mapper = struct {
             return frame_2mb_addr + (virt_addr & PAGE_MASK_2MB);
         }
         const pt_phys_addr = pde_val & PTE_ADDR_MASK;
-        const pt_virt = getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        const pt_virt = self.scratchMapVirt(pt_phys_addr, PageTable); // getTableVirtPtr(pt_phys_addr, self.kernel_offset, PageTable);
+        defer self.scratchMapDemap(pt_phys_addr);
 
         // 4. PT Entry (PTE)
         const pte_val = pt_virt.entries[pt_idx];

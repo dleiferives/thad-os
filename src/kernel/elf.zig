@@ -450,19 +450,19 @@ pub const ElfSection = struct {
         return buffer[0..pos];
     }
 
-    pub fn toMemoryMap(self: ElfSection) types.MemoryMap {
+    pub fn toMemoryMap(self: ElfSection,kernel_offset:u64) ?types.MemoryMap {
         const addr = if (self.is_64bit) self.header64.sh_addr else self.header32.sh_addr;
         const size = if (self.is_64bit) self.header64.sh_size else self.header32.sh_size;
-        const offset = if (self.is_64bit) self.header64.sh_offset else self.header32.sh_offset;
 
+        if(addr < kernel_offset + size) return null;
         return types.MemoryMap{
             .virtual = types.MemoryRange{
                 .start = addr,
                 .end = addr + size,
             },
             .physical =  types.MemoryRange{
-                .start = offset,
-                .end = offset + size,
+                .start = addr - kernel_offset,
+                .end = addr - kernel_offset + size,
             },
         };
 

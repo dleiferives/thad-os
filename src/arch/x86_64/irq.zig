@@ -1,6 +1,7 @@
 const std = @import("std");
 const kernel= @import("kernel");
 const pf_log = std.log.scoped(.irq_page_fault);
+const irq_log = std.log.scoped(.irq);
 
 // ============================================================================
 // Core Types and Enums
@@ -256,6 +257,9 @@ const pic = struct {
     };
 };
 
+
+
+
 // ============================================================================
 // Interrupt Dispatcher
 // ============================================================================
@@ -315,9 +319,7 @@ pub const exceptions = struct {
         std.log.err("  RCX: 0x{X:0>16} RDX: 0x{X:0>16}", .{ frame.rcx, frame.rdx });
     }
 
-
     fn pageFault(frame: *InterruptFrame) void {
-        asm volatile ("cli");
         const fault_addr = asm volatile ("mov %%cr2, %[result]"
             : [result] "=r" (-> u64)
         );
@@ -325,10 +327,6 @@ pub const exceptions = struct {
         const present = (frame.error_code & 1) != 0;
         const write = (frame.error_code & 2) != 0;
         const user = (frame.error_code & 4) != 0;
-        var rsp = asm volatile ("mov %%rsp, %[result]"
-            : [result] "=r" (-> u64)
-        );
-        std.log.err("RSP : 0x{X:0>16}", .{rsp});
 
         pf_log.err("Page Fault at address: 0x{X:0>16}", .{fault_addr});
         pf_log.err("  RIP: 0x{X:0>16}", .{frame.rip});
@@ -350,21 +348,22 @@ pub const exceptions = struct {
                         if (success) {
                             pf_log.info("Successfully handled demand page fault at 0x{X:0>16}", .{fault_addr});
                             pf_log.info("Continuing execution after handling page fault", .{});
-
-                            rsp = asm volatile ("mov %%rsp, %[result]"
-                                : [result] "=r" (-> u64)
-                            );
-                            std.log.err("RSP : 0x{X:0>16}", .{rsp});
-                            asm volatile ("sti");
                             return; // Successfully handled, continue execution
                         } else {
                             pf_log.err("Failed to handle demand page fault at 0x{X:0>16}", .{fault_addr});
-                            while(true){}
-                            asm volatile ("sti");
+                            asm volatile("cli; hlt");
                             return;
                         }
                     } else |err| {
-                        pf_log.err("Error handling demand page fault: {}", .{err});
+                        // TODO
+                        // @(dleiferives,b45808dd-3874-4253-aed1-a34a791684b6):
+                        // upgrade this to fault out the program that is calling.
+                        // if its in the kernel... well the kernel really should
+                        // not be running out of space. could use swap or
+                        // something. at the end of the day I think that I will
+                        // just make it such that the heap will not overallocate
+                        // (ie. limit the heap to the nmber of free pages.) ~#
+                        irq_log.err("Error handling demand page fault: {}", .{err});
                     }
                 }
             }

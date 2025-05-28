@@ -27,7 +27,7 @@ pub const std_options: std.Options = .{
 // Using the linker to sneakily move some asm into language code
 // Namely, we're using .bss.stacck to be at the end of the .bss section
 // this will become the stack that the kernel uses
-export var kernel_stack: [0x4000]u8 align(16) linksection(".bss.stack") = undefined;
+export var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack") = undefined;
 
 // Basic Multiboot2 header
 comptime {

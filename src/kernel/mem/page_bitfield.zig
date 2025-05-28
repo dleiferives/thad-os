@@ -11,6 +11,7 @@ pub const PageBitFieldError = error {
     InvalidRange,
     AddressNotAligned,
     AddressNotInField,
+    PageNotInField,
 };
 // a bitfeild that stores pages.
 // to initilize it, we pass in an allocator,
@@ -36,6 +37,8 @@ pub const PageBitField = struct {
 
         var pages: u64 = 0;
         var bit_ranges = std.ArrayList(BitRange).init(self.allocator);
+        var new_ranges = std.ArrayList(types.MemoryRange).init(self.allocator);
+
         for (ranges) |range| {
             const start = std.mem.alignForward(u64, range.start, 4096) / 4096;
             const end = std.mem.alignBackward(u64, range.end - 1, 4096) / 4096;
@@ -45,16 +48,18 @@ pub const PageBitField = struct {
                 continue;
             }
             // as we align forward and backward, this means if end == start we have 1 page!
-            pages += end - start + 1;
+            pages += end - start;
             verbose_log.info("Yeilding {} pages", .{pages});
             const bit_range = BitRange{
                 .start = self.pages,
                 .end = pages,
             };
             try bit_ranges.append(bit_range);
+            try new_ranges.append(types.MemoryRange{.start = start * 4096, .end = end * 4096});
             self.pages = pages;
         }
-        self.bit_ranges = bit_ranges.items;
+        self.bit_ranges = bit_ranges.items[0..];
+        self.ranges = new_ranges.items[0..];
 
         self.bitfield = try allocator.alloc(u64, (pages + 63) / 64);
         // This is going to round up the number of entries that we need in our bitfield.
@@ -136,7 +141,9 @@ pub const PageBitField = struct {
         }
         for (self.bit_ranges,0..) |bit_range,range_idx| {
             if (self.ranges[range_idx].contains(address)) {
-                const range_bit_offset: u64 = ((address / 4096) - std.mem.alignForward(u64, self.ranges[range_idx].start, 4096)) / 4096;
+                const addr_start = address;
+                const align_index =std.mem.alignForward(u64, self.ranges[range_idx].start, 4096);
+                const range_bit_offset: u64 = (addr_start - align_index) / 4096;
                 const bit_offset = range_bit_offset + bit_range.start;
                 const bit_id = BitRef{
                     .index = (bit_offset) >> 6,
@@ -168,27 +175,34 @@ pub const PageBitField = struct {
 
     // Gets the page address from the page id.
     pub fn pageFromId(self: *PageBitField, id: u64) ?u64 {
-        verbose_log.info("Getting page from id: {}", .{id});
+        // verbose_log.info("Getting page from id: {}", .{id});
         if (id >= self.pages) {
-            verbose_log.info("Page id is out of range", .{});
+            // verbose_log.info("Page id is out of range", .{});
             return null;
         }
         for (self.bit_ranges,0..) |bit_range,range_idx| {
             if (!bit_range.contains(id)) continue;
+            // verbose_log.info("{} in {}",.{id,range_idx});
             const aligned_start = std.mem.alignForward(u64, self.ranges[range_idx].start, 4096);
             const address = aligned_start + (4096 * (id - bit_range.start));
-            verbose_log.info("Found page address: 0x{X:0>16}", .{address});
+            // if(id > 31900){
+            //     verbose_log.info("Found page address: 0x{X:0>16}", .{address});
+            //     verbose_log.info("start 0x{X:0>16}",.{aligned_start});
+            //     verbose_log.info("addr 0x{X:0>16}",.{address});
+            //     while(true){}
+
+            // }
             return address;
         }
         return null;
-
     }
+
 
     /// Allocates a page from the bitfield.
     /// Returns the address of the page.
     /// If no pages are available, returns null.
     pub fn allocatePage(self: *PageBitField) ?u64 {
-        verbose_log.info("Allocating page", .{});
+        // verbose_log.info("Allocating page", .{});
         for (self.bitfield,0..) |entry, index| {
             if (entry != 0xFFFFFFFFFFFFFFFF) {
                 // find the first bit that is not set
@@ -197,13 +211,14 @@ pub const PageBitField = struct {
                 // This means that we're always going to allocate from the end forward.
                 const bit_offset = @ctz(~entry);
                 const page_id = (index << 6) + bit_offset;
-                verbose_log.info("Found page id: {}", .{page_id});
+
+                // verbose_log.info("Found page id: {}", .{page_id});
                 const page = self.pageFromId(page_id);
                 if (page) |address| {
                     // set the bit in the bitfield
                     const mask: u64 = @as(u64,1) << @as(u6,@truncate(bit_offset));
                     self.bitfield[index] |= mask;
-                    verbose_log.info("Allocated page: 0x{X:0>16}", .{address});
+                    // verbose_log.info("Allocated page: 0x{X:0>16}", .{address});
                     return address;
                 } else {
                     return null;
@@ -236,6 +251,7 @@ pub const PageBitField = struct {
             if (bit_id.index >= self.bitfield.len) {
                 return PageBitFieldError.PageNotInField;
             }
+            // std.log.err("found bit id {any}",.{bit_id});
             // clear the bit in the bitfield
             const mask: u64 = @as(u64,1) << @as(u6,@truncate(bit_id.bit));
             self.bitfield[bit_id.index] &= ~mask;
@@ -243,6 +259,92 @@ pub const PageBitField = struct {
         }
         return PageBitFieldError.AddressNotInField;
     }
+
+    pub const Tester = packed struct {
+        next: ?*Tester,
+        data: u64,
+
+        pub var kernel_offset: u64 = undefined;
+
+        fn virt(addr: u64) u64{
+            return addr + Tester.kernel_offset;
+        }
+    };
+    pub fn tester(self: *PageBitField, kernel_offset: u64) !void{
+        Tester.kernel_offset = kernel_offset;
+        std.log.info("starting the tester",.{});
+
+        for (self.ranges,0..) |range,idx|{
+            std.log.info("Found range 0x{X:0>16} 0x{X:0>16}",.{range.start,range.end});
+            std.log.info("Found bange 0x{X:0>16} 0x{X:0>16}",.{self.bit_ranges[idx].start,self.bit_ranges[idx].end});
+        }
+
+        const head_page = self.allocatePage() orelse {
+            std.log.info("Could not create head for tester",.{});
+            return;
+        };
+
+        // for(self.bit_ranges[0].end-800..self.bit_ranges[0].end + 20) |i|{
+        //     const temp_page = self.pageFromId(i);
+        //     std.log.info("{} 0x{X:0>16}",.{i,temp_page.?});
+        // }
+        // for(self.bit_ranges[1].end-100..self.bit_ranges[1].end) |i|{
+        //     const temp_page = self.pageFromId(i);
+        //     std.log.info("{} 0x{X:0>16}",.{i,temp_page.?});
+        // }
+        // for(31900..32000) |i|{
+        //     const temp_page = self.pageFromId(i);
+        //     std.log.info("{} 0x{X:0>16}",.{i,temp_page.?});
+        // }
+        //     while(true){}
+
+        const head: *Tester = @ptrFromInt(Tester.virt(head_page));
+        head.next = null;
+        var cursor: *Tester = head;
+        var i: usize = 0;
+        std.log.warn("PageBitFeildTest: Allocating:\n",.{});
+        while (self.allocatePage()) |page| : (i += 1){
+            std.log.warn("{} @ 0x{X:0>8}\r",.{i, page});
+            const cast: *Tester = @ptrFromInt(Tester.virt(page));
+            // std.log.info("cursor is 0x{X:0>16}",.{@intFromPtr(cursor)});
+            // std.log.info("cast is 0x{X:0>16}",.{@intFromPtr(cast)});
+            cast.next = cursor;
+            const data: [*]u64 = @ptrCast(cast);
+            for(1..64) |j|{
+                data[j] = page;
+            }
+            cursor = cast;
+        }
+        std.log.warn("\nPageBitFeildTest: Allocated all pages\n",.{});
+
+        i = 0;
+        while(true) : (i += 1){
+            const current: *Tester = cursor;
+            // std.log.info("current is 0x{X:0>16}",.{@intFromPtr(current)});
+            if(current.next == null) {
+                std.log.info("No more pages to free, breaking", .{});
+                try self.freePage(@intFromPtr(current) & ~Tester.kernel_offset);
+                break;
+            }
+
+            const data: [*]u64 = @ptrCast(current);
+            // std.log.info("current next is 0x{X:0>16}",.{@intFromPtr(current.next.?)});
+            for(1..64) |j|{
+                if (data[j] != @as(u64,@intFromPtr(current)) - Tester.kernel_offset) {
+                    std.log.err("Entry {} in {} does not match",.{j,i});
+                    std.log.err("Expected: 0x{X:0>16}, got: 0x{X:0>16}",.{data[j], @intFromPtr(current) - Tester.kernel_offset});
+                    while(true){}
+                }
+            }
+            cursor = current.next.?;
+            try self.freePage(@intFromPtr(current) - Tester.kernel_offset);
+            std.log.warn("PageBitFeildTest: free {}\r",.{i});
+        }
+
+        std.log.warn("\nPageBitFeildTest: Free all pages\n",.{});
+    }
+
+
 };
 
 pub const BitRef = struct {
@@ -255,6 +357,6 @@ pub const BitRange = struct {
     end: u64,
 
     pub inline fn contains(self: BitRange, address: u64) bool {
-        return address >= self.start and address < self.end;
+        return (address >= self.start) and (address < self.end);
     }
 };
