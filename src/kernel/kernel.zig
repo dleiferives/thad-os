@@ -3,6 +3,7 @@ const drivers = @import("drivers");
 const mem = @import("mem.zig");
 const multiboot = @import("multiboot.zig");
 const arch = @import("arch");
+const config = @import("config");
 
 const log = std.log.scoped(.kernel);
 
@@ -16,6 +17,8 @@ comptime {
 
 pub var log_level: std.log.Level = std.log.Level.err;
 
+/// The 64 bit kernel's entry point
+/// Really just calls panic if the true main loop fails!
 pub export fn kmain() callconv(.C) void {
     main() catch |err| {
         log.err("Kernel main failed: {}", .{err});
@@ -23,28 +26,34 @@ pub export fn kmain() callconv(.C) void {
     };
 }
 
+
+/// The main function of the kernel
+/// Sets up base drivers, memory management, then initiates threading.
 pub fn main() !void {
     allowed_scopes = ALL_SCOPES[0..];
+    // enable testing
+    {
+        state.testing.vga = config.test_vga;
+        state.testing.page_bitfield = config.test_pagebitfield;
+        state.testing.mapper = config.test_mapper;
+        state.testing.map_dispatch = config.test_map_dispatch;
+        state.testing.allocator = config.test_allocator;
+    }
 
-    state.mem_layout_init();
+    try state.mem_layout_init();
     arch.cpu.gdt.init();
 
+    // Initialize interrupt system
     try arch.irq.irq.init();
     arch.irq.irq.enable();
     // Initilize the VGA driver
     state.vga_init(0xb8000);
-    state.testing.vga = true;
 
-    // Initialize interrupt system
 
     // Initialize the serial driver
     state.serial_log_init(drivers.serial_log.DEFAULT_BAUDRATE, .COM1);
 
-    // // log.info("Info header {x}",.{@as(u64,@intFromPtr(multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset)))});
-    // log.info("Info header {}",.{multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset)});
-    // var mbi = multiboot.Multiboot2Info.init(multiboot.loadInfoHeader(state.mem_manager.memory_layout.kernel_offset));
-    // mbi.dumpInfo(drivers.serial.writer(state.stdio_port)) catch {};
-
+    // Initilize the memory manager
     try state.mem_manager_init();
     if (state.testing.mapper) {
         try state.mem_manager.test_mapper(0xFFFFFF8010000000);
@@ -69,9 +78,8 @@ pub fn main() !void {
             kbd_manager.pollAndProcessInput();
 
             // Add a small delay to prevent hogging CPU in a polling loop
-            // This is a placeholder; a proper OS would have a scheduler or idle loop.
             var i: u32 = 0;
-            while (i < 500) : (i += 1) { // Adjust delay as needed
+            while (i < 500) : (i += 1) {
                 asm volatile ("" ::: "memory");
             }
         }
@@ -146,9 +154,6 @@ pub fn main() !void {
         try testDemandPaging();
     }
     log.info("Kernel loaded", .{});
-
-
-
 }
 
 pub const Kernel = struct {
@@ -174,16 +179,16 @@ pub const Kernel = struct {
     stdio_port: drivers.serial_log.Port,
     stdio_baudrate: usize,
     stdio_init: bool,
-    mem_manager: mem.Manager,
+    mem_manager: *mem.Manager,
     multiboot_info: multiboot.Multiboot2Info,
     kernel_heap: ?mem.allocator.FreeListAllocator = null,
 
-    pub inline fn mem_layout_init(self: *Kernel) void {
+    pub inline fn mem_layout_init(self: *Kernel) !void {
         if (self.initilized.mem_layout) {
             log.warn("Memory layout already initialized", .{});
             return;
         }
-        self.mem_manager = mem.Manager.new();
+        self.mem_manager = try mem.Manager.new();
         self.initilized.mem_layout = true;
         log.info("Memory layout initialized", .{});
     }
@@ -194,7 +199,7 @@ pub const Kernel = struct {
             return;
         }
         if (!self.initilized.mem_layout) {
-            self.mem_manager = mem.Manager.new();
+            self.mem_manager = try mem.Manager.new();
             self.initilized.mem_layout = true;
             return;
         }
@@ -304,6 +309,7 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, return_address: ?
 
 pub fn print(comptime format: []const u8, args: anytype) void {
     // Print logging protect via disabling interrupts
+    // arch.cpu.cli();
     if (drivers.vga.initialized) {
         drivers.vga.print(format, args) catch {};
     }
@@ -381,9 +387,6 @@ pub fn logger(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    // Ignore all non-error logging from sources other than
-    // .my_project, .nice_library and the default
-
     if (!std.mem.eql(u8, @tagName(scope), @tagName(.default))) {
         if (allowed_scopes) |allowed| {
             var found = false;

@@ -6,10 +6,6 @@ const arch = @import("../arch.zig");
 
 const log = std.log.scoped(.arch_gdt);
 
-// ============================================================================
-// GDT Constants and Structures
-// ============================================================================
-
 /// GDT Access byte flags
 const ACCESS = struct {
     const PRESENT: u8 = 1 << 7;       // Present bit
@@ -21,7 +17,6 @@ const ACCESS = struct {
     const READABLE: u8 = 1 << 1;      // Readable (code) / Writable (data)
     const ACCESSED: u8 = 1 << 0;      // Accessed bit
 
-    // TSS type (for system descriptors)
     const TSS_AVAILABLE: u8 = 0x9;    // Available 64-bit TSS
 };
 
@@ -52,7 +47,7 @@ pub const SELECTOR = struct {
     }
 };
 
-/// Standard GDT entry (8 bytes)
+/// GDT entry (8 bytes)
 const GdtEntry = packed struct {
     limit_low: u16,     // Lower 16 bits of limit
     base_low: u16,      // Lower 16 bits of base
@@ -106,7 +101,7 @@ const GdtEntry = packed struct {
     }
 };
 
-/// TSS entry (16 bytes in x86_64) - spans two GDT entries
+/// TSS entry (16 bytes in x86_64) -- we treat this as two entries
 const TssEntry = packed struct {
     limit_low: u16,
     base_low: u16,
@@ -114,8 +109,8 @@ const TssEntry = packed struct {
     access: u8,
     limit_flags: u8,
     base_high: u8,
-    base_upper: u32,    // Upper 32 bits of base (x86_64 only)
-    reserved: u32,      // Must be zero
+    base_upper: u32,
+    reserved: u32, // zero
 
     fn init(tss_base: u64) TssEntry {
         const limit = @sizeOf(TaskStateSegment) - 1;
@@ -132,23 +127,22 @@ const TssEntry = packed struct {
     }
 };
 
-/// Task State Segment structure
 const TaskStateSegment = packed struct {
     reserved1: u32,
-    rsp0: u64,          // Stack pointer for ring 0
-    rsp1: u64,          // Stack pointer for ring 1 (unused)
-    rsp2: u64,          // Stack pointer for ring 2 (unused)
+    rsp0: u64,
+    rsp1: u64,
+    rsp2: u64,
     reserved2: u64,
-    ist1: u64,          // Interrupt Stack Table 1
-    ist2: u64,          // Interrupt Stack Table 2
-    ist3: u64,          // Interrupt Stack Table 3
-    ist4: u64,          // Interrupt Stack Table 4
-    ist5: u64,          // Interrupt Stack Table 5
-    ist6: u64,          // Interrupt Stack Table 6
-    ist7: u64,          // Interrupt Stack Table 7
+    ist1: u64,
+    ist2: u64,
+    ist3: u64,
+    ist4: u64,
+    ist5: u64,
+    ist6: u64,
+    ist7: u64,
     reserved3: u64,
     reserved4: u16,
-    iomap_base: u16,    // I/O Map Base Address
+    iomap_base: u16,
 
     fn init() TaskStateSegment {
         return TaskStateSegment{
@@ -177,11 +171,14 @@ const GdtPointer = packed struct {
     base: u64,
 };
 
-// ============================================================================
-// Global GDT State
-// ============================================================================
-
-/// The actual GDT table (7 entries: null, kcode, kdata, udata, ucode, tss_low, tss_high)
+/// The actual GDT table  in use
+///  - null
+///  - kcode
+///  - kdata
+///  - udata
+///  - ucode
+///  - tss_low
+///  - tss_high)
 var gdt_table: [7]u64 align(8) = undefined;
 
 /// TSS instance
@@ -195,10 +192,6 @@ pub var kernel_stack_gdt: [0x4000]u8 align(16) = undefined; // 16KB kernel stack
 
 /// Flag to track initialization
 var initialized: bool = false;
-
-// ============================================================================
-// Core GDT Functions
-// ============================================================================
 
 /// Initialize the GDT with proper kernel/user segments and TSS
 pub fn init() void {
@@ -215,33 +208,32 @@ pub fn init() void {
     // Set up GDT entries as u64 values
     const entries = @as([*]GdtEntry, @ptrCast(&gdt_table));
 
-    // Entry 0: Null descriptor
+    // Entry 0: null descriptor
     entries[0] = GdtEntry.initNull();
 
-    // Entry 1: Kernel code segment (ring 0, 64-bit)
+    // Entry 1: kernel code segment (ring 0, 64-bit)
     entries[1] = GdtEntry.initCode(0, true);
 
-    // Entry 2: Kernel data segment (ring 0)
+    // Entry 2: kernel data segment (ring 0)
     entries[2] = GdtEntry.initData(0);
 
-    // Entry 3: User data segment (ring 3) - must come before user code for sysret
+    // Entry 3: user data segment (ring 3) - must come before user code for sysret
     entries[3] = GdtEntry.initData(3);
 
-    // Entry 4: User code segment (ring 3, 64-bit)
+    // Entry 4: user code segment (ring 3, 64-bit)
     entries[4] = GdtEntry.initCode(3, true);
 
-    // Entries 5-6: TSS (takes 16 bytes = 2 entries in x86_64)
+    // Entries 5-6: TSS
     tss = TaskStateSegment.init();
     const tss_addr = @intFromPtr(&tss);
     const tss_entry = TssEntry.init(tss_addr);
 
-    // Copy TSS entry bytes into GDT
+    // Copy over bytes
     const tss_bytes = std.mem.asBytes(&tss_entry);
     var entries_ptr: [*]u8 = @ptrCast(&entries[5]);
     for (0..16) |i| {
         entries_ptr[i] = tss_bytes[i];
     }
-    // @memcpy(std.mem.asBytes(&entries[5])[0..16], tss_bytes);
 
     // Set up kernel stack in TSS
     const kernel_stack_top = @intFromPtr(&kernel_stack_gdt) + kernel_stack_gdt.len;
@@ -253,17 +245,13 @@ pub fn init() void {
         .base = @intFromPtr(&gdt_table),
     };
 
-    // Load the GDT
     loadGdt();
-
-    // Load TSS
     loadTss();
 
     initialized = true;
     log.info("GDT initialized successfully", .{});
 }
 
-/// Load the GDT using lgdt instruction
 fn loadGdt() void {
     asm volatile (
         \\lgdt (%[gdt_ptr])
@@ -272,7 +260,6 @@ fn loadGdt() void {
         : "memory"
     );
 
-    // Reload segment registers
     asm volatile (
         \\mov %[data_sel], %%ax
         \\mov %%ax, %%ds
@@ -302,9 +289,6 @@ fn loadTss() void {
     );
 }
 
-// ============================================================================
-// Stack Management
-// ============================================================================
 
 /// Set the kernel stack pointer in the TSS
 /// This stack will be used when transitioning from user mode to kernel mode
@@ -349,12 +333,10 @@ pub fn getKernelStack() u64 {
     return if (initialized) tss.rsp0 else 0;
 }
 
-// ============================================================================
-// User Mode Transition
-// ============================================================================
 
 /// Switch to user mode and jump to the specified address
 /// This function does not return - it transfers control to user space
+// TODO @(dleiferives,c626aaae-48af-46bc-a7fb-d7dc183f6b71): FINISH ~#
 pub fn switchToUserMode(user_rip: u64, user_rsp: u64) noreturn {
     if (!initialized) {
         @panic("GDT not initialized - cannot switch to user mode");
@@ -401,9 +383,6 @@ pub fn switchToUserMode(user_rip: u64, user_rsp: u64) noreturn {
     unreachable;
 }
 
-// ============================================================================
-// Utility Functions
-// ============================================================================
 
 /// Get the current code segment selector
 pub fn getCurrentCS() u16 {
@@ -454,7 +433,6 @@ pub fn debugPrint() void {
     }
 }
 
-/// Test function to verify GDT setup
 pub fn tester() !void {
     log.info("Running GDT tests...", .{});
 

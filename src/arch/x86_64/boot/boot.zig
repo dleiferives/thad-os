@@ -29,7 +29,11 @@ pub const std_options: std.Options = .{
 // this will become the stack that the kernel uses
 export var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack") = undefined;
 
-// Basic Multiboot2 header
+
+
+
+// TODO @(dleiferives,ab22758a-dd7e-42ad-916b-bff21ff6c8e2): Replace this with zig
+// and not asm ~#
 comptime {
     asm (
         \\ .set MBOOT2_MAGIC, 0xE85250D6
@@ -125,9 +129,9 @@ comptime {
         \\ addq %rax, %rsp
         \\
         \\ /* Unmap identity mapping of lower memory */
-        \\ movq $0, %rax                  #// Value to write (0)
-        \\ movabs $BootP4, %rbx           #// Load the 64-bit address of BootP4 into RBX
-        \\ movq %rax, (%rbx)              #// Write the value from RAX to the address in RBX
+        \\ movq $0, %rax                  # Value to write (0)
+        \\ movabs $BootP4, %rbx           # Load the 64-bit address of BootP4 into RBX
+        \\ movq %rax, (%rbx)              # Write the value from RAX to the address in RBX
         \\
         \\ /* Reload cr3 to flush TLB */
         \\ movq %cr3, %rax

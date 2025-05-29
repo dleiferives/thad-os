@@ -190,54 +190,52 @@ pub const elf = struct {
 
 /// Symbol Binding Attributes (for st_info)
     pub const STB = struct {
-        pub const LOCAL = 0; // Local symbol
-        pub const GLOBAL = 1; // Global symbol
-        pub const WEAK = 2; // Weak symbol
-        // Other values exist for OS/processor specifics
+        pub const LOCAL = 0;
+        pub const GLOBAL = 1;
+        pub const WEAK = 2;
     };
 
     /// Symbol Types (for st_info)
     pub const STT = struct {
         pub const NOTYPE = 0; // Symbol type is unspecified
-        pub const OBJECT = 1; // Symbol is a data object
-        pub const FUNC = 2; // Symbol is a code object (function)
-        pub const SECTION = 3; // Symbol associated with a section
+        pub const OBJECT = 1;
+        pub const FUNC = 2;
+        pub const SECTION = 3;
         pub const FILE = 4; // Symbol's name is file name
         pub const COMMON = 5; // Symbol is a common block
         pub const TLS = 6; // Symbol is thread-local storage
-        // Other values exist for OS/processor specifics
     };
 
     /// Special Section Indices (for st_shndx)
     pub const SHN = struct {
-        pub const UNDEF = 0; // Undefined section
-        pub const LOPROC = 0xFF00; // Start of processor-specific
-        pub const HIPROC = 0xFF1F; // End of processor-specific
-        pub const LOOS = 0xFF20; // Start of OS-specific
-        pub const HIOS = 0xFF3F; // End of OS-specific
-        pub const ABS = 0xFFF1; // Associated symbol is absolute
-        pub const COMMON = 0xFFF2; // Associated symbol is common (Fortran)
-        pub const XINDEX = 0xFFFF; // Index is in extra table (SHT_SYMTAB_SHNDX)
+        pub const UNDEF = 0;
+        pub const LOPROC = 0xFF00;
+        pub const HIPROC = 0xFF1F;
+        pub const LOOS = 0xFF20;
+        pub const HIOS = 0xFF3F;
+        pub const ABS = 0xFFF1;
+        pub const COMMON = 0xFFF2;
+        pub const XINDEX = 0xFFFF;
     };
 
     /// 32-bit Symbol Table Entry
     pub const Elf32_Sym = extern struct {
         st_name: u32, // Symbol name (index into string table)
-        st_value: u32, // Value of the symbol
-        st_size: u32, // Associated size, if any
-        st_info: u8, // Type and binding attributes
+        st_value: u32,
+        st_size: u32,
+        st_info: u8,
         st_other: u8, // Reserved (visibility for ELF64)
-        st_shndx: u16, // Section header index
+        st_shndx: u16,
     };
 
     /// 64-bit Symbol Table Entry
     pub const Elf64_Sym = extern struct {
         st_name: u32, // Symbol name (index into string table)
-        st_info: u8, // Type and binding attributes
-        st_other: u8, // Symbol visibility (usually st_other & 0x3)
-        st_shndx: u16, // Section header index
-        st_value: u64, // Value of the symbol
-        st_size: u64, // Associated size, if any
+        st_info: u8,
+        st_other: u8,
+        st_shndx: u16,
+        st_value: u64,
+        st_size: u64,
     };
 
     // Helper functions for st_info
@@ -266,7 +264,7 @@ pub const elf = struct {
 
 
 
-/// ELF section header iterator - no allocations required
+/// ELF section header iterator
 pub const ElfSectionIterator = struct {
     tag: *const ElfSymbolsTag,
     current_index: usize = 0,
@@ -351,7 +349,6 @@ pub const ElfSectionIterator = struct {
         return section;
     }
 
-    /// Get the string table section - useful to get section names
     pub fn findStringTableSection(self: *ElfSectionIterator) ?ElfSection {
         // Save current state
         const original_index = self.current_index;
@@ -373,7 +370,7 @@ pub const ElfSectionIterator = struct {
     }
 };
 
-/// Represents a single ELF section
+/// Represents a *single* ELF section
 pub const ElfSection = struct {
     header32: elf.Elf32_Shdr,
     header64: elf.Elf64_Shdr,

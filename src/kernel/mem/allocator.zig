@@ -113,7 +113,7 @@ pub const FreeListAllocator = struct {
     headers: ?*Header,
     start: usize,
     end: usize,
-    mapper: mem.Mapper,
+    mapper: *mem.Mapper,
     flags: mem.PageFlags,
     // log: @TypeOf(log_verbose),
 
@@ -122,7 +122,7 @@ pub const FreeListAllocator = struct {
 
     pub const MIN_ALLOC_SIZE = @sizeOf(Header);
 
-    pub fn init(start: usize, initial_size: usize, mapper: mem.Mapper, flags: mem.PageFlags) !FreeListAllocator {
+    pub fn init(start: usize, initial_size: usize, mapper: *mem.Mapper, flags: mem.PageFlags) !FreeListAllocator {
         var allocator_er = FreeListAllocator{
             .headers = null,
             .start = start,

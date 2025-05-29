@@ -1,12 +1,11 @@
 const std = @import("std");
 const kernel= @import("kernel");
+const cpu = @import("cpu.zig");
 const pf_log = std.log.scoped(.irq_page_fault);
 const irq_log = std.log.scoped(.irq);
 
-// ============================================================================
-// Core Types and Enums
-// ============================================================================
 
+/// Interrupt vector enum, just a helper lol
 pub const Vector = enum(u8) {
     // CPU Exceptions
     divide_error = 0,
@@ -64,22 +63,21 @@ pub const Vector = enum(u8) {
     }
 };
 
-// Update InterruptFrame to match x86_64 layout
 pub const InterruptFrame = extern struct {
-    // Segment registers (pushed by our stub)
+    // Segment registers
     gs: u64, fs: u64, es: u64, ds: u64,
 
-    // General purpose registers (pushed by our stub)
+    // General registers
     r15: u64, r14: u64, r13: u64, r12: u64,
     r11: u64, r10: u64, r9: u64, r8: u64,
     rbp: u64, rdi: u64, rsi: u64, rdx: u64,
     rcx: u64, rbx: u64, rax: u64,
 
-    // Interrupt info (pushed by our stub)
+    // Interrupt data
     vector: u64,
     error_code: u64,
 
-    // CPU-pushed values (pushed by CPU during interrupt)
+    // From the cpu during interrupt!
     rip: u64,
     cs: u64,
     rflags: u64,
@@ -87,11 +85,9 @@ pub const InterruptFrame = extern struct {
     ss: u64,
 };
 
+// The interrupt handler function!
 pub const HandlerFn = *const fn (frame: *InterruptFrame) void;
 
-// ============================================================================
-// IDT Management
-// ============================================================================
 
 pub const idt = struct {
     const Gate = packed struct {
@@ -99,7 +95,7 @@ pub const idt = struct {
         selector: u16,
         ist: u3,
         reserved0: u5 = 0,
-        gate_type: u4 = 0xE, // Interrupt gate
+        gate_type: u4 = 0xE,
         zero: u1 = 0,
         dpl: u2,
         present: u1,
@@ -110,6 +106,8 @@ pub const idt = struct {
         fn init(handler: u64, dpl: u2) Gate {
             return .{
                 .offset_low = @truncate(handler),
+                // TODO @(dleiferives,d379d31b-db97-4356-b8ee-b87ca606d56d): Make
+                // it be imported from gdt ~#
                 .selector = 0x08, // Kernel code segment
                 .ist = 0,
                 .dpl = dpl,
@@ -165,10 +163,7 @@ pub const idt = struct {
     }
 };
 
-// ============================================================================
-// Hardware Controllers (keep your existing PIC code)
-// ============================================================================
-
+// Hardware controllers //
 const ControllerError = error{ InvalidIrq, Timeout, HardwareError };
 
 const Controller = struct {
@@ -180,37 +175,23 @@ const Controller = struct {
 };
 
 const pic = struct {
-    const MASTER_CMD = 0x20;
-    const MASTER_DATA = 0x21;
-    const SLAVE_CMD = 0xA0;
-    const SLAVE_DATA = 0xA1;
-
-    fn out8(port: u16, value: u8) void {
-        asm volatile ("outb %[value], %[port]"
-            :
-            : [value] "{al}" (value), [port] "N{dx}" (port)
-        );
-    }
-
-    fn in8(port: u16) u8 {
-        return asm volatile ("inb %[port], %[result]"
-            : [result] "={al}" (-> u8)
-            : [port] "N{dx}" (port)
-        );
-    }
+    const CONTROLLER_CMD = 0x20;
+    const CONTROLLER_DATA = 0x21;
+    const FOLLOWER_CMD = 0xA0;
+    const FOLLOWER_DATA = 0xA1;
 
     fn init() ControllerError!void {
         // Remap PIC to vectors 32-47
-        out8(MASTER_CMD, 0x11);
-        out8(SLAVE_CMD, 0x11);
-        out8(MASTER_DATA, 32);
-        out8(SLAVE_DATA, 40);
-        out8(MASTER_DATA, 4);
-        out8(SLAVE_DATA, 2);
-        out8(MASTER_DATA, 1);
-        out8(SLAVE_DATA, 1);
-        out8(MASTER_DATA, 0xFF); // Mask all
-        out8(SLAVE_DATA, 0xFF);
+        cpu.outb(CONTROLLER_CMD, 0x11);
+        cpu.outb(FOLLOWER_CMD, 0x11);
+        cpu.outb(CONTROLLER_DATA, 32);
+        cpu.outb(FOLLOWER_DATA, 40);
+        cpu.outb(CONTROLLER_DATA, 4);
+        cpu.outb(FOLLOWER_DATA, 2);
+        cpu.outb(CONTROLLER_DATA, 1);
+        cpu.outb(FOLLOWER_DATA, 1);
+        cpu.outb(CONTROLLER_DATA, 0xFF); // Mask all
+        cpu.outb(FOLLOWER_DATA, 0xFF);
     }
 
     fn mask(irq_num: u8) ControllerError!void {
@@ -218,13 +199,13 @@ const pic = struct {
 
         var port: u16 = undefined;
         if (irq_num < 8) {
-            port = MASTER_DATA;
+            port = CONTROLLER_DATA;
         } else {
-            port = SLAVE_DATA;
+            port = FOLLOWER_DATA;
         }
         const bit = if (irq_num < 8) irq_num else irq_num - 8;
-        const current = in8(port);
-        out8(port, current | (@as(u8, 1) << @intCast(bit)));
+        const current = cpu.inb(port);
+        cpu.outb(port, current | (@as(u8, 1) << @intCast(bit)));
     }
 
     fn unmask(irq_num: u8) ControllerError!void {
@@ -232,20 +213,20 @@ const pic = struct {
 
         var port: u16 = undefined;
         if (irq_num < 8) {
-            port = MASTER_DATA;
+            port = CONTROLLER_DATA;
         } else {
-            port = SLAVE_DATA;
+            port = FOLLOWER_DATA;
         }
         const bit = if (irq_num < 8) irq_num else irq_num - 8;
-        const current = in8(port);
-        out8(port, current & ~(@as(u8, 1) << @intCast(bit)));
+        const current = cpu.inb(port);
+        cpu.outb(port, current & ~(@as(u8, 1) << @intCast(bit)));
     }
 
     fn eoi(irq_num: u8) ControllerError!void {
         if (irq_num >= 16) return ControllerError.InvalidIrq;
 
-        if (irq_num >= 8) out8(SLAVE_CMD, 0x20);
-        out8(MASTER_CMD, 0x20);
+        if (irq_num >= 8) cpu.outb(FOLLOWER_CMD, 0x20);
+        cpu.outb(CONTROLLER_CMD, 0x20);
     }
 
     const controller: Controller = .{
@@ -260,10 +241,7 @@ const pic = struct {
 
 
 
-// ============================================================================
-// Interrupt Dispatcher
-// ============================================================================
-
+// Interrupt Dispatcher //
 pub const dispatcher = struct {
     var handlers: [256]?HandlerFn = [_]?HandlerFn{null} ** 256;
 
@@ -309,7 +287,6 @@ pub const dispatcher = struct {
     }
 };
 
-// Keep your existing exception handlers but update the function signature
 pub const exceptions = struct {
     fn formatException(comptime name: []const u8, frame: *InterruptFrame) void {
         std.log.err("EXCEPTION: {s}", .{name});
@@ -337,11 +314,12 @@ pub const exceptions = struct {
             if (user) "user" else "kernel",
         });
 
-        // Keep your existing page fault handling logic...
         if (!present) {
+            // TODO @(dleiferives,d84fdf12-0708-41a7-98e1-f3d3c83ec957): update in
+            // threading rewrite to get mapper from the current thread! ~#
             const kernel_state = kernel.state;
             if (kernel_state.initilized.mem_manager) {
-                if (kernel_state.mem_manager.mapper) |*mapper_ptr| {
+                if (kernel_state.mem_manager.mapper) |mapper_ptr| {
                     pf_log.err("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
                     var mapper = @constCast(mapper_ptr);
                     if (mapper.handleDemandPageFault(fault_addr)) |success| {
@@ -418,7 +396,6 @@ pub const exceptions = struct {
     }
 };
 
-// Keep your existing irq interface but update the main init function
 pub const irq = struct {
     var current_controller: Controller = pic.controller;
 

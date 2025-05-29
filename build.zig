@@ -195,6 +195,21 @@ pub fn build(b: *std.Build) void {
     arch.addObjectFile(b.path("src/arch/x86_64/interrupt_stubs.o"));
 
 
+    const test_vga = b.option(bool,"test_vga","Enable Vga Test for early kernel boot") orelse false;
+    const test_pagebitfield = b.option(bool,"test_pagebitfield","Enable page_bitfield for early kernel boot") orelse false;
+    const test_mapper = b.option(bool,"test_mapper","Enable test_mapper for early kernel boot") orelse false;
+    const test_map_dispatch = b.option(bool,"test_map_dispatch","Enable test_map_dispatch for early kernel boot") orelse false;
+    const test_allocator = b.option(bool,"test_allocator","Enable test_allocator for early kernel boot") orelse false;
+    // Add our options
+    const options = b.addOptions();
+    options.addOption(bool,"test_vga",test_vga);
+    options.addOption(bool,"test_pagebitfield",test_pagebitfield);
+    options.addOption(bool,"test_mapper",test_mapper);
+    options.addOption(bool,"test_map_dispatch",test_map_dispatch);
+    options.addOption(bool,"test_allocator",test_allocator);
+    kernel.addOptions("config", options);
+
+
     // Create an executable
     const exe = b.addExecutable(.{
         .name = "kernel",

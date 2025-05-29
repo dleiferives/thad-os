@@ -48,21 +48,24 @@ pub const Manager = struct {
     reserved_physical_ranges: []types.MemoryRange,
     available_physical_ranges: []types.MemoryRange,
 
-    mapper: ?Mapper = null,
+    mapper: ?*Mapper = null,
 
     /// The bitfield for the pages
     page_bitfield: PageBitField,
 
     internal_allocator: std.mem.Allocator,
 
-    pub fn new() Manager {
+    /// Sets up a new memory manager -> this is not alllocated
+    pub fn new() !*Manager {
         verbose_log.info("Creating new memory manager", .{});
-        const result = Manager{
+        const internal_allocator = Manager.memory_manager_internal_allocator.allocator();
+        const result = try internal_allocator.create(Manager);
+        result.* = Manager{
             .memory_layout = types.MEMORY_LAYOUT.init(),
             .reserved_virtual_maps = undefined,
             .reserved_physical_ranges = undefined,
             .available_physical_ranges = undefined,
-            .internal_allocator = Manager.memory_manager_internal_allocator.allocator(),
+            .internal_allocator = internal_allocator,
             .mapper = null,
             .page_bitfield = undefined,
         };
@@ -206,7 +209,7 @@ pub const Manager = struct {
 
         // // Create a new address space (PML4)
         try Mapper.initScratchMap(self.memory_layout.kernel_offset);
-        var new_mapper = try Mapper.create(&self.page_bitfield, self.memory_layout.kernel_offset);
+        var new_mapper = try Mapper.create(&self.page_bitfield, self.memory_layout.kernel_offset, self.internal_allocator);
         self.mapper = new_mapper; // Assign to manager's mapper field
         cpt.log();
         manager_log.info("New Mapper created.", .{});
@@ -251,8 +254,6 @@ pub const Manager = struct {
 
         // // Map VGA buffer
         // const vga_phys_addr: u64 = 0xB8000;
-        // // The virtual address for VGA depends on how the kernel expects to access it.
-        // // Often it's kernel_offset + physical_address.
         // const vga_virt_addr: u64 = vga_phys_addr + self.memory_layout.kernel_offset;
         // const vga_flags = PageFlags{ .present = true, .writable = true, .cache_disable = false, .execute_disable = false};
         // try new_mapper.map(vga_virt_addr, vga_phys_addr, vga_flags);
@@ -378,11 +379,6 @@ pub const Manager = struct {
     pub var memory_manager_allocation_buffer: [0x10_0000]u8 = undefined;
     var memory_manager_internal_allocator: std.heap.FixedBufferAllocator = std.heap.FixedBufferAllocator.init(memory_manager_allocation_buffer[0..]);
 };
-
-// In ./src/kernel/mem.zig
-
-// Add these definitions at the top of the file or in a relevant section.
-// (Make sure to place it before the existing `Manager` struct or adjust imports if moved to a new file)
 
 const PageMapLevel4 = extern struct {
     entries: [PAGE_TABLE_ENTRY_COUNT]u64,
@@ -655,8 +651,7 @@ const PageTable = extern struct {
     };
 };
 
-// Page Table Entry Flags (IA-32e, 64-bit mode)
-// Common flags
+// Page Table Entry Flags IA-32e
 const PT_PRESENT: u64 = 1 << 0;
 const PT_WRITABLE: u64 = 1 << 1;
 const PT_USER_ACCESSIBLE: u64 = 1 << 2;
@@ -666,10 +661,12 @@ const PT_ACCESSED: u64 = 1 << 5; // Set by hardware
 const PT_DIRTY: u64 = 1 << 6; // Set by hardware (PTE, or PDE/PDPE with PS=1)
 const PT_PAGE_SIZE: u64 = 1 << 7; // PS bit (for PDE, PDPE indicating 2MB/1GB page)
 const PT_GLOBAL: u64 = 1 << 8; // For PTE, or PDE/PDPE with PS=1
-// Bits 9-11 are available for OS use
-const PT_CUSTOM_0: u64 = 1 << 9;
+
+// Bits 9-11 are available for my use
+const PT_DEMAND_ALLOC: u64 = 1 << 9;
 const PT_CUSTOM_1: u64 = 1 << 10;
 const PT_CUSTOM_2: u64 = 1 << 11;
+
 // PAT bits depend on context (PTE vs Large Page)
 const PT_PAT_PTE: u64 = 1 << 7; // PAT bit for PTE (if PS=0, reuses PS bit position)
 const PT_PAT_LARGE_PAGE: u64 = 1 << 12; // PAT bit for PDE (PS=1, 2MB) or PDPE (PS=1, 1GB)
@@ -724,10 +721,8 @@ pub const MapperError = error{
     NotInScratchMap,
 };
 
-/// Flags for mapping a page.
-const PT_DEMAND_ALLOC: u64 = 1 << 9; // Using PT_CUSTOM_0 for demand allocation bit
 
-// Update PageFlags structure
+/// Flags for mapping a page.
 pub const PageFlags = struct {
     present: bool = true,
     writable: bool = true,
@@ -736,7 +731,7 @@ pub const PageFlags = struct {
     cache_disable: bool = false,
     global: bool = false,
     execute_disable: bool = false,
-    demand_alloc: bool = false, // NEW: For demand paging
+    demand_alloc: bool = false,
 
     pub fn to_bits(self: PageFlags) u64 {
         var flags: u64 = if (self.present) PT_PRESENT else 0;
@@ -768,7 +763,9 @@ pub const PageFlags = struct {
     }
 };
 
-// Now, the Mapper struct itself:
+/// The mapper -> this will be given to each of the programs,
+/// they will have their own mapper
+/// from this mapper an allocator will be made. which will do the allocation for each program
 pub const Mapper = struct {
     pml4_phys_addr: u64,
     pmm: *PageBitField,
@@ -813,16 +810,14 @@ pub const Mapper = struct {
         );
     }
 
-    /// Gets the current physical address of the PML4 table from CR3.
     pub fn currentPML4() u64 {
         var val: u64 = undefined;
         asm volatile ("mov %%cr3, %[val]"
             : [val] "=r" (val),
         );
-        return val; //& PTE_ADDR_MASK; // CR3 also contains PCID bits if enabled
+        return val;
     }
 
-    /// Loads the given physical address of a PML4 table into CR3.
     pub fn loadPML4(pml4_phys_addr: u64) void {
         // std.debug.assert(pml4_phys_addr & PAGE_MASK_4K == 0);
         mapper_verbose_log.debug("loadding physical address: 0x{x}", .{pml4_phys_addr});
@@ -840,9 +835,11 @@ pub const Mapper = struct {
 
     /// Initializes a new Mapper with a new, empty PML4 table.
     /// The caller is responsible for populating this new PML4 and then calling `loadPML4`.
-    pub fn create(pmm: *PageBitField, kernel_offset: u64) !Self {
+    pub fn create(pmm: *PageBitField, kernel_offset: u64, allocator_local: std.mem.Allocator) !*Self {
         mapper_log.debug("Creating new Mapper instance...", .{});
-        var mapper = Self{
+        var mapper = try allocator_local.create(Self);
+
+        mapper.* = Self{
             .pml4_phys_addr = 0, // Will be set after allocation
             .pmm = pmm,
             .kernel_offset = kernel_offset,
@@ -863,9 +860,6 @@ pub const Mapper = struct {
     }
 
     /// Internal helper: Walks to the next level page table, creating it if necessary.
-    /// `parent_entry_virt_ptr`: Virtual pointer to the entry in the parent table (e.g., PML4E).
-    /// `entry_flags_for_new_table`: Flags for the parent entry if a new table is created (e.g., PRESENT, WRITABLE).
-    /// Returns the physical address of the next level table.
     fn get_or_create_next_table(
         self: *Self,
         parent_entry_virt_ptr: *volatile u64,
@@ -890,7 +884,6 @@ pub const Mapper = struct {
     }
 
     /// Maps a 4KB virtual page to a 4KB physical frame.
-    /// `virt_addr` and `phys_addr` must be 4KB aligned.
     pub fn map(
         self: *Self,
         virt_addr: u64,
@@ -1606,6 +1599,8 @@ pub const Mapper = struct {
         std.log.debug("PDE at index {}: 0x{X:0>16}", .{ pd_idx, pd_virt.entries[pd_idx] });
     }
 
+    // TODO @(dleiferives,ef3d975c-0197-429e-a412-1d843561e43a): Update scratch
+    // map to be setup on mapper initilization! ~#
     pub fn scratchMapVirt(self: *Self, phys_addr: u64, comptime return_type: type) *return_type {
         _ = self;
         for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
@@ -1633,7 +1628,6 @@ pub const Mapper = struct {
     }
 
     /// Translates a virtual address to its corresponding physical address.
-    /// Returns `null` if the address is not mapped or if it encounters an unsupported large page.
     pub fn translate(self: *Self, virt_addr: u64) ?u64 {
         mapper_translate_log.debug("Translating 0x{X}", .{virt_addr});
         const pml4_idx = pml4Index(virt_addr);
@@ -1700,119 +1694,3 @@ pub const Mapper = struct {
     }
 };
 
-// Integration into Manager struct (in src/kernel/mem.zig):
-// Add `mapper: Mapper,` to the Manager struct.
-
-// In Manager.new():
-// Initialize mapper after PMM and memory_layout are ready.
-// This part is a bit tricky because `Manager.new()` might be too early if PMM isn't fully up.
-// It's better to initialize `Mapper` within `Manager.init()`.
-
-// Modify Manager.new() to initialize mapper as undefined or an option type.
-// For example:
-// pub var mapper: ?Mapper = null; // In Manager struct
-
-// Then in Manager.init(self: *Manager, multiboot_info: multiboot.Multiboot2Info) !void:
-// ... after self.page_bitfield is initialized ...
-//
-// // Create a new address space (PML4)
-// var new_mapper = try Mapper.create(&self.page_bitfield, self.memory_layout.kernel_offset);
-// self.mapper = new_mapper; // Assign to manager's mapper field
-// manager_log.info("New Mapper created.", .{});
-
-// // --- Map essential kernel regions into the new_mapper ---
-// manager_log.info("Mapping kernel regions into new address space...", .{});
-// var current_phys = self.memory_layout.kernel_physical_address_start;
-// var current_virt = self.memory_layout.kernel_virtual_address_start;
-// // Kernel code is executable, data is not. For simplicity, map all as R/W, X for code.
-// // A more granular approach would map sections with different flags.
-// const kernel_code_data_flags = PageFlags{ .writable = true, .execute_disable = false }; // A general kernel flag
-//
-// while (current_phys < self.memory_layout.kernel_physical_address_end) {
-//     // Align to page boundaries for mapping
-//     const aligned_virt = current_virt & ~PAGE_MASK_4K;
-//     const aligned_phys = current_phys & ~PAGE_MASK_4K;
-//     // Check if already mapped by a previous iteration if ranges overlap due to alignment
-//     if (new_mapper.translate(aligned_virt) == null) {
-//          try new_mapper.map(aligned_virt, aligned_phys, kernel_code_data_flags);
-//     }
-//     current_phys += PAGE_SIZE_4K;
-//     current_virt += PAGE_SIZE_4K;
-// }
-// manager_log.info("Kernel regions mapped (approx range phys: 0x{x}-0x{x} to virt: 0x{x}-0x{x}).", .{
-//     self.memory_layout.kernel_physical_address_start, self.memory_layout.kernel_physical_address_end,
-//     self.memory_layout.kernel_virtual_address_start, self.memory_layout.kernel_virtual_address_end,
-// });
-
-// // Map VGA buffer
-// const vga_phys_addr: u64 = 0xB8000;
-// // The virtual address for VGA depends on how the kernel expects to access it.
-// // Often it's kernel_offset + physical_address.
-// const vga_virt_addr: u64 = vga_phys_addr + self.memory_layout.kernel_offset;
-// const vga_flags = PageFlags{ .writable = true, .cache_disable = true, .execute_disable = true };
-// try new_mapper.map(vga_virt_addr, vga_phys_addr, vga_flags);
-// manager_log.info("VGA buffer mapped: phys 0x{x} to virt 0x{x}", .{vga_phys_addr, vga_virt_addr});
-
-// // Map the Multiboot Information Structure
-// var mbi_ptr_raw: u64 = undefined;
-// asm volatile ( // Get physical address of MBI stored by bootloader assembly
-//     "movabs $multiboot_info_ptr, %%rcx\n\t"
-//     "mov (%%rcx), %%rcx"
-//     : [_] "={rcx}" (mbi_ptr_raw)
-// );
-// const mbi_phys_start_aligned = mbi_ptr_raw & ~PAGE_MASK_4K;
-// const mbi_virt_start_aligned = (multiboot_info.header_ptr + self.memory_layout.kernel_offset) & ~PAGE_MASK_4K;
-// // Note: multiboot_info.header_ptr from loadInfoHeader is already virtual (kernel_offset | raw_physical)
-// // So, the virtual address is simply multiboot_info.header_ptr
-// const mbi_actual_virt_start_aligned = @ptrToInt(multiboot_info.header_ptr) & ~PAGE_MASK_4K;
-
-// var current_mbi_map_offset: u64 = 0;
-// const mbi_total_size = multiboot_info.header_ptr.total_size;
-// const mbi_map_flags = PageFlags{ .writable = false, .execute_disable = true }; // Read-only
-// manager_log.info("Mapping Multiboot info (phys_base: 0x{x}, virt_base: 0x{x}, size: {})", .{
-//     mbi_phys_start_aligned, mbi_actual_virt_start_aligned, mbi_total_size});
-// while (current_mbi_map_offset < mbi_total_size) {
-//     const map_virt = mbi_actual_virt_start_aligned + current_mbi_map_offset;
-//     const map_phys = mbi_phys_start_aligned + current_mbi_map_offset;
-//     if (new_mapper.translate(map_virt) == null) { // Avoid remapping if part of kernel image
-//         try new_mapper.map(map_virt, map_phys, mbi_map_flags);
-//     }
-//     current_mbi_map_offset += PAGE_SIZE_4K;
-// }
-// manager_log.info("Multiboot info mapped.", .{});
-
-// // Map the memory_manager_allocation_buffer (where PMM's internal allocator state might be)
-// // This buffer is likely in .bss, so its physical backing needs to be mapped to its virtual address.
-// const mma_buffer_virt_start = @ptrToInt(&memory_manager_allocation_buffer);
-// const mma_buffer_phys_start = mma_buffer_virt_start - self.memory_layout.kernel_offset; // Assuming it's in higher half
-// var mma_offset: u64 = 0;
-// manager_log.info("Mapping memory_manager_allocation_buffer (virt: 0x{x}, phys: 0x{x}, size: 0x{x})", .{
-//     mma_buffer_virt_start, mma_buffer_phys_start, @sizeOf(@TypeOf(memory_manager_allocation_buffer))});
-// while (mma_offset < @sizeOf(@TypeOf(memory_manager_allocation_buffer))) {
-//     const map_virt = (mma_buffer_virt_start + mma_offset) & ~PAGE_MASK_4K;
-//     const map_phys = (mma_buffer_phys_start + mma_offset) & ~PAGE_MASK_4K;
-//     if (new_mapper.translate(map_virt) == null) {
-//          try new_mapper.map(map_virt, map_phys, PageFlags{ .writable = true, .execute_disable = true });
-//     }
-//     mma_offset += PAGE_SIZE_4K;
-// }
-// manager_log.info("memory_manager_allocation_buffer mapped.", .{});
-
-// // After all essential mappings are done for the new_mapper:
-// Mapper.loadPML4(new_mapper.pml4_phys_addr);
-// manager_log.info("New PML4 (0x{x}) loaded into CR3.", .{new_mapper.pml4_phys_addr});
-
-// // Test translation with the new mapper
-// const test_virt_addr = self.memory_layout.kernel_virtual_address_start;
-// if (new_mapper.translate(test_virt_addr)) |translated_phys_addr| {
-//     manager_log.info("Post-load test translation: virt 0x{x} -> phys 0x{x} (expected phys 0x{x})", .{
-//         test_virt_addr, translated_phys_addr, self.memory_layout.kernel_physical_address_start + (test_virt_addr & PAGE_MASK_4K)
-//     });
-//     if ((translated_phys_addr & ~PAGE_MASK_4K) != (self.memory_layout.kernel_physical_address_start & ~PAGE_MASK_4K)) {
-//         manager_log.err("Post-load translation mismatch!", .{});
-//     }
-// } else {
-//     manager_log.err("Post-load test translation failed for virt 0x{x}", .{test_virt_addr});
-// }
-//
-// // At this point, the new address space is active.
