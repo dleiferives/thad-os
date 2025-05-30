@@ -7,7 +7,7 @@ const log_verbose = std.log.scoped(.drivers_ps2_verbose);
 // Define a placeholder if not available or configure for your environment
 
 // Default timeout iterations for busy-waiting loops
-pub const DEFAULT_TIMEOUT_ITERATIONS: u32 = 100_000;
+pub const DEFAULT_TIMEOUT_ITERATIONS: u32 = 100_000_00;
 
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 // I/O Port Abstraction
@@ -438,6 +438,7 @@ pub const Ps2Controller = struct {
             if ((self.status_port.read() & ps2.STATUS_OUTPUT_BUFFER_FULL) != 0) {
                 return;
             }
+            asm volatile ( "" :::);
         }
         return Ps2Error.Timeout;
     }

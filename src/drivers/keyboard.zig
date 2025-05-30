@@ -9,10 +9,6 @@ const DeviceType = Ps2ControllerModule.DeviceType;
 const log = std.log.scoped(.drivers_keyboard);
 const log_verbose = std.log.scoped(.drivers_keyboard_verbose);
 
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// Scan Code Set 2 Definitions and Key Enum
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// This is a partial mapping for brevity. A full driver would have all keys.
 // Based on common Scan Code Set 2 values.
 // TODO @(dleiferives,794619e9-698f-40b4-8108-2bad486f7e48): add all of the
 // scancodes and their parsing ~#
@@ -554,7 +550,6 @@ pub const KeyboardManager = struct {
     }
 
     /// Polls for keyboard input from available keyboards.
-    /// In a real OS, this try vga.driver.printic would be triggered by interrupts.
     /// This function is designed to be called repeatedly in a loop.
     pub fn pollAndProcessInput(self: *Self) void {
         // Check controller status to see if data is available
@@ -632,3 +627,31 @@ pub const KeyboardManager = struct {
         }
     }
 };
+
+
+
+const arch = @import("arch");
+var ps2_ctrl : *Ps2Controller  = undefined;
+var kbd_mgr  : *KeyboardManager = undefined;
+
+/// IRQ-1 (keyboard) handler.
+fn irq1Handler(frame: *arch.irq.InterruptFrame) void {
+    _ = frame; // CPU context not needed here
+    if (ps2_ctrl.onIrq1Interrupt()) |scancode| {        // ⇐ low-level read
+        if (kbd_mgr.keyboard1) |*kbd| {                 // we assume port-1 kbd
+            if (kbd.processScancode(scancode)) |evt| {  // ⇐ decode
+                if (evt.pressed) {
+                    if (evt.char) |ch| {
+                        std.log.debug("Got char {c} from keyboard\n", .{ch});
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn setup_irq(ctrl: *Ps2Controller, mgr: *KeyboardManager) !void {
+    ps2_ctrl = ctrl;
+    kbd_mgr  = mgr;
+    try arch.irq.irq.registerIrq(1, irq1Handler);
+}

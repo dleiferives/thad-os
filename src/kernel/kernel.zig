@@ -58,6 +58,7 @@ pub fn main() !void {
     if (state.testing.mapper) {
         try state.mem_manager.test_mapper(0xFFFFFF8010000000);
     }
+    // state.options.polling_keyboard =true;
     // try arch.cpu.gdt.tester();
 
     var ps2_ctrl = try drivers.ps2.Ps2Controller.init();
@@ -72,6 +73,7 @@ pub fn main() !void {
         return;
     }
 
+
     if (state.options.polling_keyboard) {
         log.info("Starting keyboard input polling. Press keys to see them on screen. (Ctrl+C won't work here!)\n", .{});
         while (true) {
@@ -84,6 +86,8 @@ pub fn main() !void {
             }
         }
     }
+    try drivers.keyboard.setup_irq(&ps2_ctrl, &kbd_manager);
+
 
     // Initialize kernel heap
     try state.initKernelHeap();
@@ -154,11 +158,17 @@ pub fn main() !void {
         try testDemandPaging();
     }
     log.info("Kernel loaded", .{});
+    while(true) {
+        // Main loop of the kernel
+        // Here we can handle interrupts, tasks, etc.
+        // For now, just sleep
+        arch.cpu.halt();
+    }
 }
 
 pub const Kernel = struct {
     testing: struct {
-        vga: bool,
+        vga: bool = false,
         page_bitfield: bool,
         mapper: bool = false,
         map_dispatch: bool = false,
@@ -233,6 +243,7 @@ pub const Kernel = struct {
             drivers.vga.test_vga() catch {};
         }
         log.info("VGA driver initialised", .{});
+        // while(true){}
         self.initilized.vga = true;
     }
 

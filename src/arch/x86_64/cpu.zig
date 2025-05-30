@@ -32,3 +32,12 @@ pub inline fn cli() void {
 pub inline fn sti() void {
     asm volatile ("sti");
 }
+
+pub inline fn in_interrupt() bool {
+    var flags: u64 = 0;
+    asm volatile (
+        \\pushfq
+        \\popq %[flags]
+        : [flags] "=r" (flags));
+    return (flags & 0x200) != 0; // Check the IF flag
+}

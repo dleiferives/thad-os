@@ -36,6 +36,12 @@ pub const Vector = enum(u8) {
     irq12 = 44, irq13 = 45, irq14 = 46, irq15 = 47,
 
     // System calls
+
+    // TODO @(dleiferives,05739ef9-0365-4d71-b6d7-168f52fe27fb): need to add yeild
+    // as a syscall for threading ~#
+    // TODO @(dleiferives,84617f56-0ea9-4ae4-9a45-828cbaa35998): need to add
+    // thread_exit as a syscall that calls a trap, which then does the thread
+    // deallocation ~#
     syscall = 128,
 
     pub fn toValue(self: Vector) u8 {

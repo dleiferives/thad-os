@@ -165,7 +165,7 @@ pub inline fn test_vga() !void {
     try print("{c}\n", .{@as(u8,@truncate(256 + '9'))}); // Should be "9"
     try print("{s}\n", .{"test string"}); // "test string"
     try print("foo{s}bar\n", .{"blah"}); // "foo%sbar"
-    try print("foo%%sbar\n", .{}); // "foo%sbar"
+    try print("foo%sbar\n", .{}); // "foo%sbar"
     try print("{d}\n", .{std.math.minInt(i32)}); // "-2147483648"
     try print("{d}\n", .{std.math.maxInt(i32)}); // "2147483647"
     try print("{}\n", .{0}); // "0"

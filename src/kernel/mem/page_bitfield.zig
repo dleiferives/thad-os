@@ -340,6 +340,29 @@ pub const PageBitField = struct {
             try self.freePage(@intFromPtr(current) - Tester.kernel_offset);
             std.log.warn("PageBitFeildTest: free {}\r",.{i});
         }
+        std.log.warn("\nPageBitFeildTest: Freed all pages\n",.{});
+
+        const page1 = self.allocatePage() orelse {
+            std.log.err("Could not allocate page for tester",.{});
+            return;
+        };
+        const page2 = self.allocatePage() orelse {
+            std.log.err("Could not allocate page for tester",.{});
+            return;
+        };
+        std.log.err("Allocated two pages for tester: 0x{X:0>16} and 0x{X:0>16}", .{page1, page2});
+        try self.freePage(page1);
+        std.log.err("Freed page 1: 0x{X:0>16}", .{page1});
+        const page3 = self.allocatePage() orelse {
+            std.log.err("Could not allocate page for tester",.{});
+            return;
+        };
+        std.log.err("Allocated page 3: 0x{X:0>16}", .{page3});
+        try self.freePage(page2);
+        std.log.err("Freed page 2: 0x{X:0>16}", .{page2});
+        try self.freePage(page3);
+        std.log.err("Freed page 3: 0x{X:0>16}", .{page3});
+
 
         std.log.warn("\nPageBitFeildTest: Free all pages\n",.{});
     }

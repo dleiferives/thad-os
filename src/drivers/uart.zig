@@ -1,5 +1,6 @@
 const std = @import("std");
 const irq = @import("arch").irq; // Your interrupt system
+const arch = @import("arch");
 
 
 // ============================================================================
@@ -281,6 +282,8 @@ pub const Uart = struct {
     }
 
     fn handleInterrupt(self: *Uart) void {
+        // TODO @(dleiferives,fa9bb658-556e-4035-98f8-2a41656afa2d): check rflags
+        // to make sure that interrupts are not enabled again during an isr ~#
         irq.irq.disable();
         const lsr = self.readReg(.LSR);
 
@@ -311,7 +314,9 @@ pub const Uart = struct {
                 _ = &tx_empty_mask; // Prevent unused variable warning
             }
         }
-        irq.irq.enable();
+        if (!arch.cpu.in_interrupt()) {
+            irq.irq.enable();
+        }
     }
 };
 
