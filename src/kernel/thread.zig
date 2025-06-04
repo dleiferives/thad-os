@@ -51,9 +51,11 @@ pub fn init() !void {
     initilized = true;
 }
 
-const EntryFn = *const fn(arg: ?*anyopaque) callconv(.noreturn) void;
+// Called by pushing the arg onto the stack. before the context frame.
+// this will be resolved at comptime by the anytype
+const EntryFn = *const fn(arg: anytype ) void;
 
-pub fn create(entry_fn: EntryFn, is_kernel: bool, mapper: *mem.Mapper, allocator: std.mem.Allocator, is_main: bool) !*Self {
+pub fn create(entry_fn: EntryFn, arg: anytype, is_kernel: bool, mapper: *mem.Mapper, allocator: std.mem.Allocator, is_main: bool) !*Self {
     var result = try allocator.create(Self);
     errdefer allocator.destroy(result);
 
