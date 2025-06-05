@@ -53,6 +53,7 @@ pub fn main() !void {
         state.testing.threading_increment = config.test_threading_increment;
         state.testing.threading_snakes = config.test_threading_snakes;
         state.testing.threading_snakes_hungry = config.test_threading_snakes_hungry;
+        state.testing.change_scheduler = config.test_change_scheduler;
     }
 
     try state.mem_layout_init();
@@ -179,6 +180,7 @@ pub fn main() !void {
         state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
         1000,
 )).scheduler();
+
     arch.irq.exceptions.initThreading();
 
     const ctx = try state.kernel_heap.?.allocator().create(thread.ThreadContext);
@@ -267,6 +269,21 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         snakes.csnakes.setup_snakes(1);
     }
 
+    if (state.testing.change_scheduler) {
+        log.info("Changing scheduler to RunToCompletionScheduler", .{});
+        const new_scheduler = scheduler.swapScheduler(
+            state.getKernelAllocator() orelse @panic("could not get allocator when trying to test changing scheduler"),
+            &state.scheduler.?,
+            .RunToCompletion,
+        ) catch |err| {
+            log.err("Failed to change scheduler: {}", .{err});
+            @panic("Failed to change scheduler");
+        };
+        state.scheduler = new_scheduler;
+        log.info("Scheduler changed to RunToCompletionScheduler", .{});
+    }
+
+
     var i: u64 = 0;
     while(true){
         log.info("idle loop {}",.{i});
@@ -286,6 +303,7 @@ pub const Kernel = struct {
         threading_increment: bool = false,
         threading_snakes: bool = false,
         threading_snakes_hungry: bool = false,
+        change_scheduler: bool = false,
     },
     initilized: struct {
         mem_layout: bool = false,

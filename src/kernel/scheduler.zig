@@ -60,23 +60,23 @@ pub const Scheduler = struct {
     scheduler_type: SchedulerType,
     current_thread: ?*Thread,
 
-    pub fn addThread(self: *Scheduler, thread: *Thread) SchedulerError!void {
+    pub fn addThread(self: *const Scheduler, thread: *Thread) SchedulerError!void {
         return self.vtable.addThread(self.ptr, thread);
     }
 
-    pub fn removeThread(self: *Scheduler, thread: *Thread) SchedulerError!void {
+    pub fn removeThread(self: *const Scheduler, thread: *Thread) SchedulerError!void {
         return self.vtable.removeThread(self.ptr, thread);
     }
 
-    pub fn selectNext(self: *Scheduler) ?*Thread {
+    pub fn selectNext(self: *const Scheduler) ?*Thread {
         return self.vtable.selectNext(self.ptr);
     }
 
-    pub fn timerTick(self: *Scheduler, current_thread: ?*Thread) bool {
+    pub fn timerTick(self: *const Scheduler, current_thread: ?*Thread) bool {
         return self.vtable.timerTick(self.ptr, current_thread);
     }
 
-    pub fn shouldPreempt(self: *Scheduler, current_thread: *Thread) bool {
+    pub fn shouldPreempt(self: *const Scheduler, current_thread: *Thread) bool {
         return self.vtable.shouldPreempt(self.ptr, current_thread);
     }
 
@@ -92,3 +92,24 @@ pub const Scheduler = struct {
         self.vtable.deinit(self.ptr, allocator);
     }
 };
+
+pub fn swapScheduler(
+    allocator: std.mem.Allocator,
+    old_scheduler: *Scheduler,
+    new_scheduler: SchedulerType,
+) !Scheduler {
+    const scheduler = switch (new_scheduler) {
+        .RoundRobin => (try RoundRobinScheduler.init(allocator, 100)).scheduler(),
+        .RunToCompletion => (try RunToCompletionScheduler.init(allocator)).scheduler(),
+        .TimeSharing => (try TimeSharingScheduler.init(allocator,100)).scheduler(),
+        else => return error.InvalidThread,
+    };
+    while (old_scheduler.selectNext()) |thread| {
+        std.log.debug("Migrating thread {}", .{thread.tid});
+        try scheduler.addThread(thread);
+        std.log.debug("number of threads is now {}",.{scheduler.getStats().total_threads});
+        try old_scheduler.removeThread(thread);
+    }
+    old_scheduler.deinit(allocator);
+    return scheduler;
+}

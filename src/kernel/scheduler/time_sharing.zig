@@ -9,93 +9,25 @@ const SchedulerError = scheduler.SchedulerError;
 const SchedulerStats = scheduler.SchedulerStats;
 const SchedulerVTable = scheduler.SchedulerVTable;
 
-const PriorityQueue = struct {
-    head: ?*Thread,
-    tail: ?*Thread,
-    count: u32,
-
-    fn init() PriorityQueue {
-        return PriorityQueue{
-            .head = null,
-            .tail = null,
-            .count = 0,
-        };
-    }
-
-    fn enqueue(self: *PriorityQueue, thread: *Thread) void {
-        thread.next = null;
-        thread.prev = self.tail;
-
-        if (self.tail) |tail| {
-            tail.next = thread;
-            self.tail = thread;
-        } else {
-            self.head = thread;
-            self.tail = thread;
-        }
-
-        self.count += 1;
-    }
-
-    fn dequeue(self: *PriorityQueue) ?*Thread {
-        if (self.head) |thread| {
-            self.head = thread.next;
-            if (self.head) |next| {
-                next.prev = null;
-            } else {
-                self.tail = null;
-            }
-
-            thread.next = null;
-            thread.prev = null;
-            self.count -= 1;
-
-            return thread;
-        }
-        return null;
-    }
-
-    fn remove(self: *PriorityQueue, thread: *Thread) void {
-        if (thread.prev) |prev| {
-            prev.next = thread.next;
-        } else {
-            self.head = thread.next;
-        }
-
-        if (thread.next) |next| {
-            next.prev = thread.prev;
-        } else {
-            self.tail = thread.prev;
-        }
-
-        thread.next = null;
-        thread.prev = null;
-
-        if (self.count > 0) {
-            self.count -= 1;
-        }
-    }
-
-    fn isEmpty(self: *const PriorityQueue) bool {
-        return self.head == null;
-    }
-};
-
 pub const TimeSharingScheduler = struct {
-    priority_queues: [5]PriorityQueue, // One queue per priority level
+    // We use an array of non-intrusive ArrayLists, one for each priority level.
+    // This keeps the Thread struct clean and scheduler-agnostic.
+    priority_queues: []std.ArrayListUnmanaged(*Thread),
     total_threads: u32,
     context_switches: u64,
     base_time_slice: u32,
     aging_threshold: u32,
     aging_counter: u32,
     allocator: std.mem.Allocator,
+    current_thread: ?*Thread = null,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, base_time_slice: u32) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
-            .priority_queues = [_]PriorityQueue{PriorityQueue.init()} ** 5,
+            // Initialize an array of 5 empty, unmanaged array lists.
+            .priority_queues = try allocator.alloc(std.ArrayListUnmanaged(*Thread), 5),
             .total_threads = 0,
             .context_switches = 0,
             .base_time_slice = base_time_slice,
@@ -111,6 +43,7 @@ pub const TimeSharingScheduler = struct {
             .ptr = self,
             .vtable = &vtable,
             .scheduler_type = .TimeSharing,
+            .current_thread = self.current_thread,
         };
     }
 
@@ -139,7 +72,10 @@ pub const TimeSharingScheduler = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         const priority_index = @intFromEnum(thread.priority);
-        self.priority_queues[priority_index].enqueue(thread);
+        const queue = &self.priority_queues[priority_index];
+
+        try queue.append(self.allocator, thread);
+
         self.total_threads += 1;
         thread.state = .READY;
         thread.remaining_time = self.getTimeSliceForPriority(thread.priority);
@@ -149,10 +85,17 @@ pub const TimeSharingScheduler = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         const priority_index = @intFromEnum(thread.priority);
-        self.priority_queues[priority_index].remove(thread);
+        const queue = &self.priority_queues[priority_index];
 
-        if (self.total_threads > 0) {
-            self.total_threads -= 1;
+        // Find the thread in the list to remove it. This is an O(n) operation.
+        for (queue.items, 0..) |t, i| {
+            if (t == thread) {
+                _ = queue.orderedRemove(i);
+                if (self.total_threads > 0) {
+                    self.total_threads -= 1;
+                }
+                return;
+            }
         }
     }
 
@@ -160,16 +103,18 @@ pub const TimeSharingScheduler = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         // Find highest priority non-empty queue
-        var priority_level: i32 = 4; // Start from highest priority
+        var priority_level: i32 = 4; // Start from KERNEL
         while (priority_level >= 0) : (priority_level -= 1) {
             const queue_index = @as(usize, @intCast(priority_level));
-            if (!self.priority_queues[queue_index].isEmpty()) {
-                if (self.priority_queues[queue_index].dequeue()) |thread| {
-                    thread.state = .RUNNING;
-                    thread.remaining_time = self.getTimeSliceForPriority(thread.priority);
-                    self.context_switches += 1;
-                    return thread;
-                }
+            const queue = &self.priority_queues[queue_index];
+
+            if (queue.items.len > 0) {
+                // Dequeue from the front (FIFO within a priority level)
+                const thread = queue.orderedRemove(0);
+                thread.state = .RUNNING;
+                thread.remaining_time = self.getTimeSliceForPriority(thread.priority);
+                self.context_switches += 1;
+                return thread;
             }
         }
 
@@ -181,7 +126,6 @@ pub const TimeSharingScheduler = struct {
 
         self.aging_counter += 1;
 
-        // Perform aging every aging_threshold ticks
         if (self.aging_counter >= self.aging_threshold) {
             self.aging_counter = 0;
             self.performAging();
@@ -194,35 +138,35 @@ pub const TimeSharingScheduler = struct {
             }
         }
 
-        return false;
+        return true; // Preempt if time expired or no current thread
     }
 
     fn performAging(self: *Self) void {
-        // Move some threads from lower priority queues to higher ones
-        // to prevent starvation
+        // Iterate from lowest to highest priority, promoting some threads
+        // to prevent starvation. We don't age threads into or out of KERNEL.
         var priority_level: usize = 0;
-        while (priority_level < 3) : (priority_level += 1) { // Don't age KERNEL priority
-            var queue = &self.priority_queues[priority_level];
-            var thread = queue.head;
-            var threads_to_promote: u32 = queue.count / 4; // Promote 25% of threads
+        while (priority_level < 3) : (priority_level += 1) { // IDLE, LOW, NORMAL
+            const old_queue = &self.priority_queues[priority_level];
+            var threads_to_promote = old_queue.items.len / 4; // Promote 25%
 
-            while (thread != null and threads_to_promote > 0) {
-                const next_thread = thread.?.next;
+            // Iterate backwards to safely remove items while iterating.
+            var i = old_queue.items.len;
+            while (i > 0 and threads_to_promote > 0) {
+                i -= 1;
+                const thread = old_queue.items[i];
+                const new_priority:thread_s.Priority = @enumFromInt(priority_level + 1);
+                const new_queue = &self.priority_queues[priority_level + 1];
 
-                // Remove from current queue
-                queue.remove(thread.?);
-
-                // Promote priority
-                if (@intFromEnum(thread.?.priority) < 4) {
-                    thread.?.priority = @enumFromInt(@intFromEnum(thread.?.priority) + 1);
+                // Attempt to add to the higher priority queue first.
+                // If it fails (OOM), we leave the thread in its current queue.
+                if (new_queue.append(self.allocator, thread)) |_| {
+                    // On success, remove from the old queue and update state.
+                    _ = old_queue.orderedRemove(i);
+                    thread.priority = new_priority;
+                    threads_to_promote -= 1;
+                } else |_| {
+                    // Failed to allocate, so we can't promote. Continue.
                 }
-
-                // Add to higher priority queue
-                const new_priority_index = @intFromEnum(thread.?.priority);
-                self.priority_queues[new_priority_index].enqueue(thread.?);
-
-                thread = next_thread;
-                threads_to_promote -= 1;
             }
         }
     }
@@ -230,30 +174,28 @@ pub const TimeSharingScheduler = struct {
     fn shouldPreempt(ptr: *anyopaque, current_thread: *Thread) bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
+        // Preempt if time slice expired
+        if (current_thread.remaining_time == 0) {
+            return true;
+        }
+
         // Check if there's a higher priority thread waiting
-        const current_priority = @intFromEnum(current_thread.priority);
-        var priority_level: usize = current_priority + 1;
+        const current_priority_val = @intFromEnum(current_thread.priority);
+        var priority_level = current_priority_val + 1;
         while (priority_level < 5) : (priority_level += 1) {
-            if (!self.priority_queues[priority_level].isEmpty()) {
-                return true; // Higher priority thread available
+            if (self.priority_queues[priority_level].items.len > 0) {
+                return true; // Higher priority thread is ready
             }
         }
 
-        // Preempt if time slice expired
-        return current_thread.remaining_time == 0;
+        return false;
     }
 
     fn getStats(ptr: *anyopaque) SchedulerStats {
         const self: *Self = @ptrCast(@alignCast(ptr));
-
-        var ready_threads: u32 = 0;
-        for (self.priority_queues) |queue| {
-            ready_threads += queue.count;
-        }
-
         return SchedulerStats{
             .total_threads = self.total_threads,
-            .ready_threads = ready_threads,
+            .ready_threads = self.total_threads,
             .context_switches = self.context_switches,
             .scheduler_type = .TimeSharing,
         };
@@ -262,8 +204,8 @@ pub const TimeSharingScheduler = struct {
     fn reset(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        for (&self.priority_queues) |*queue| {
-            queue.* = PriorityQueue.init();
+        for (self.priority_queues) |*queue| {
+            queue.clearAndFree(self.allocator);
         }
         self.total_threads = 0;
         self.context_switches = 0;
@@ -272,6 +214,10 @@ pub const TimeSharingScheduler = struct {
 
     fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        // Deinit all internal lists before destroying the scheduler itself.
+        for (self.priority_queues) |*queue| {
+            queue.deinit(self.allocator);
+        }
         allocator.destroy(self);
     }
 };

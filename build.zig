@@ -204,6 +204,8 @@ pub fn build(b: *std.Build) void {
     const test_threading_increment = b.option(bool,"test_threading_increment","Enable test_threading_increment for early kernel boot") orelse false;
     const test_threading_snakes = b.option(bool,"test_threading_snakes","Enable test_threading_snakes for early kernel boot") orelse false;
     const test_threading_snakes_hungry = b.option(bool,"test_threading_snakes_hungry","Enable test_threading_snakes_hungry for early kernel boot") orelse false;
+    const test_change_scheduler = b.option(bool,"test_change_scheduler","Enable test_change_scheduler for early kernel boot") orelse false;
+
     // Add our options
     const options = b.addOptions();
     options.addOption(bool,"test_vga",test_vga);
@@ -214,6 +216,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool,"test_threading_increment",test_threading_increment);
     options.addOption(bool,"test_threading_snakes",test_threading_snakes);
     options.addOption(bool,"test_threading_snakes_hungry",test_threading_snakes_hungry);
+    options.addOption(bool,"test_change_scheduler",test_change_scheduler);
     kernel.addOptions("config", options);
 
 

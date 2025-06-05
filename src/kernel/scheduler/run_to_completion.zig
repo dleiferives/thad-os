@@ -9,20 +9,17 @@ const SchedulerStats = scheduler.SchedulerStats;
 const SchedulerVTable = scheduler.SchedulerVTable;
 
 pub const RunToCompletionScheduler = struct {
-    ready_queue: ?*Thread,
-    queue_tail: ?*Thread,
-    total_threads: u32,
+    ready_queue: std.ArrayListUnmanaged(*Thread),
     context_switches: u64,
     allocator: std.mem.Allocator,
+    current_thread: ?*Thread = null,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
-            .ready_queue = null,
-            .queue_tail = null,
-            .total_threads = 0,
+            .ready_queue = .{}, // Initialize an empty list
             .context_switches = 0,
             .allocator = allocator,
         };
@@ -34,6 +31,7 @@ pub const RunToCompletionScheduler = struct {
             .ptr = self,
             .vtable = &vtable,
             .scheduler_type = .RunToCompletion,
+            .current_thread = self.current_thread,
         };
     }
 
@@ -51,19 +49,10 @@ pub const RunToCompletionScheduler = struct {
     fn addThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Add to end of queue (FIFO)
-        thread.next = null;
-        thread.prev = self.queue_tail;
+        // Add to end of queue (FIFO) by appending to the list.
+        // We catch and map the potential allocation error.
+        try self.ready_queue.append(self.allocator, thread);
 
-        if (self.queue_tail) |tail| {
-            tail.next = thread;
-            self.queue_tail = thread;
-        } else {
-            self.ready_queue = thread;
-            self.queue_tail = thread;
-        }
-
-        self.total_threads += 1;
         thread.state = .READY;
         thread.remaining_time = std.math.maxInt(u32); // Infinite time slice
     }
@@ -71,48 +60,42 @@ pub const RunToCompletionScheduler = struct {
     fn removeThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        if (thread.prev) |prev| {
-            prev.next = thread.next;
-        } else {
-            self.ready_queue = thread.next;
-        }
-
-        if (thread.next) |next| {
-            next.prev = thread.prev;
-        } else {
-            self.queue_tail = thread.prev;
-        }
-
-        thread.next = null;
-        thread.prev = null;
-
-        if (self.total_threads > 0) {
-            self.total_threads -= 1;
+        // To remove a thread, we must find it in the list first.
+        // This is an O(n) operation, a trade-off for a non-intrusive list.
+        for (self.ready_queue.items, 0..) |t, i| {
+            if (t == thread) {
+                _ = self.ready_queue.orderedRemove(i);
+                return; // Thread found and removed.
+            }
         }
     }
 
     fn selectNext(ptr: *anyopaque) ?*Thread {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        if (self.ready_queue) |thread| {
-            // Remove from front (FIFO)
-            self.ready_queue = thread.next;
-            if (self.ready_queue) |next| {
-                next.prev = null;
-            } else {
-                self.queue_tail = null;
-            }
-
-            thread.next = null;
-            thread.prev = null;
-            thread.state = .RUNNING;
-            thread.remaining_time = std.math.maxInt(u32);
-            self.context_switches += 1;
-
-            return thread;
+        // If the queue is empty, there's no thread to select.
+        if (self.ready_queue.items.len == 0) {
+            return null;
         }
 
-        return null;
+        // Remove from the front of the queue (FIFO).
+        var thread = self.ready_queue.items[0];
+        if(self.ready_queue.items.len > 1) {
+            if (thread.is_start) {
+                // If the thread is a start thread, we remove it from the queue.
+                _ = self.ready_queue.orderedRemove(0);
+                // then we put it back to the end of the queue.
+                self.ready_queue.append(self.allocator, thread) catch {
+                    @panic("Failed to re-add start thread to the queue");
+                };
+                thread = self.ready_queue.items[0];
+            }
+        }
+        thread.state = .RUNNING;
+        thread.remaining_time = std.math.maxInt(u32);
+        self.context_switches += 1;
+
+        return thread;
     }
 
     fn timerTick(ptr: *anyopaque, current_thread: ?*Thread) bool {
@@ -131,10 +114,11 @@ pub const RunToCompletionScheduler = struct {
 
     fn getStats(ptr: *anyopaque) SchedulerStats {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        const thread_count:u32 = @intCast(self.ready_queue.items.len);
 
         return SchedulerStats{
-            .total_threads = self.total_threads,
-            .ready_threads = self.total_threads,
+            .total_threads = thread_count,
+            .ready_threads = thread_count, // In RTC, all threads are ready
             .context_switches = self.context_switches,
             .scheduler_type = .RunToCompletion,
         };
@@ -143,14 +127,15 @@ pub const RunToCompletionScheduler = struct {
     fn reset(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        self.ready_queue = null;
-        self.queue_tail = null;
-        self.total_threads = 0;
+        // Clear the list and free its associated memory.
+        self.ready_queue.clearAndFree(self.allocator);
         self.context_switches = 0;
     }
 
     fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        // Deinitialize the internal list first to prevent memory leaks.
+        self.ready_queue.deinit(self.allocator);
         allocator.destroy(self);
     }
 };
