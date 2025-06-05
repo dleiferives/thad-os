@@ -1,46 +1,94 @@
-// this file is the "Scheduler" struct in zig. consider it as such
+// src/kernel/scheduler.zig
 const std = @import("std");
-const thread = @import("thread.zig");
-const mem = @import("mem.zig");
-const Self = @This();
+const thread_s = @import("thread.zig");
+const Thread = thread_s.Thread;
+pub const RoundRobinScheduler = @import("scheduler/round_robin.zig").RoundRobinScheduler;
+pub const RunToCompletionScheduler = @import("scheduler/run_to_completion.zig").RunToCompletionScheduler;
+pub const TimeSharingScheduler= @import("scheduler/time_sharing.zig").TimeSharingScheduler;
 
 
-
-/// The type erased pointer to the allocator implementation.
-///
-/// Any comparison of this field may result in illegal behavior, since it may
-/// be set to `undefined` in cases where the allocator implementation does not
-/// have any associated state.
-ptr: *anyopaque,
-vtable: *const VTable,
-current_thread: ?*thread,
-calling_thread: *thread, // the thread that called the scheduler functions
-
-pub const SchedulerError = error {
-    NotInitialized,
+pub const SchedulerError = error{
+    NoThreadsReady,
+    InvalidThread,
     OutOfMemory,
-    InvalidThreadId,
-    ThreadTableFull,
     ThreadNotFound,
-    ThreadAlreadyExists,
-    SchedulerNotKernel,
-    CannotRemoveKernelThread,
-    CannotRemoveCallingThread,
-    ThreadNotInScheduler,
-} || std.mem.Allocator.Error;
+};
 
+pub const SchedulerType = enum {
+    RoundRobin,
+    RunToCompletion,
+    TimeSharing,
+    Priority,
+};
 
-pub const VTable = struct {
+pub const SchedulerVTable = struct {
+    /// Add a thread to the scheduler
+    addThread: *const fn (self: *anyopaque, thread: *Thread) SchedulerError!void,
 
-    // Schedules a thread to run
-    schedule: fn (*anyopaque, thread: *thread, allocator: *std.mem.Allocator) SchedulerError!void,
+    /// Remove a thread from the scheduler
+    removeThread: *const fn (self: *anyopaque, thread: *Thread) SchedulerError!void,
 
-    // Next thread to run.
-    next_thread: fn (*anyopaque, allocator: *std.mem.Allocator) SchedulerError!*thread.Thread,
+    /// Select the next thread to run
+    selectNext: *const fn (self: *anyopaque) ?*Thread,
 
-    // Removes a thread from the scheduler.
-    remove_thread: fn (*anyopaque, allocator: *std.mem.Allocator, thread: *thread) SchedulerError!void,
+    /// Handle timer tick (for preemptive schedulers)
+    timerTick: *const fn (self: *anyopaque, current_thread: ?*Thread) bool,
 
-    current_thread: fn (*anyopaque) ?*thread,
+    /// Check if current thread should be preempted
+    shouldPreempt: *const fn (self: *anyopaque, current_thread: *Thread) bool,
 
+    /// Get scheduler statistics
+    getStats: *const fn (self: *anyopaque) SchedulerStats,
+
+    /// Reset scheduler state
+    reset: *const fn (self: *anyopaque) void,
+
+    /// Cleanup scheduler resources
+    deinit: *const fn (self: *anyopaque, allocator: std.mem.Allocator) void,
+};
+
+pub const SchedulerStats = struct {
+    total_threads: u32,
+    ready_threads: u32,
+    context_switches: u64,
+    scheduler_type: SchedulerType,
+};
+
+pub const Scheduler = struct {
+    ptr: *anyopaque,
+    vtable: *const SchedulerVTable,
+    scheduler_type: SchedulerType,
+    current_thread: ?*Thread,
+
+    pub fn addThread(self: *Scheduler, thread: *Thread) SchedulerError!void {
+        return self.vtable.addThread(self.ptr, thread);
+    }
+
+    pub fn removeThread(self: *Scheduler, thread: *Thread) SchedulerError!void {
+        return self.vtable.removeThread(self.ptr, thread);
+    }
+
+    pub fn selectNext(self: *Scheduler) ?*Thread {
+        return self.vtable.selectNext(self.ptr);
+    }
+
+    pub fn timerTick(self: *Scheduler, current_thread: ?*Thread) bool {
+        return self.vtable.timerTick(self.ptr, current_thread);
+    }
+
+    pub fn shouldPreempt(self: *Scheduler, current_thread: *Thread) bool {
+        return self.vtable.shouldPreempt(self.ptr, current_thread);
+    }
+
+    pub fn getStats(self: *const Scheduler) SchedulerStats {
+        return self.vtable.getStats(self.ptr);
+    }
+
+    pub fn reset(self: *Scheduler) void {
+        self.vtable.reset(self.ptr);
+    }
+
+    pub fn deinit(self: *Scheduler, allocator: std.mem.Allocator) void {
+        self.vtable.deinit(self.ptr, allocator);
+    }
 };

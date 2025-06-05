@@ -970,15 +970,17 @@ pub const Mapper = struct {
         // check if the range is already mapped
         // using the translate function
         var current_virt = start_virt_addr;
+        var new_start = start_virt_addr;
         while (current_virt <= end_virt_addr) {
             if (self.translate(current_virt)) |phys_addr| {
                 mapper_log.warn("mapDemandRange: virt_addr 0x{x} already mapped to 0x{x}.\n", .{ current_virt, phys_addr });
-                return MapperError.AlreadyMapped;
+                new_start = current_virt;
+                // return MapperError.AlreadyMapped;
             }
             current_virt += PAGE_SIZE_4K;
         }
 
-        current_virt = start_virt_addr;
+        current_virt = new_start;
         while (current_virt <= end_virt_addr) {
             // allocate a page
             const phys_addr = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;

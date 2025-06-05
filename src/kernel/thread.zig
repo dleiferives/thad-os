@@ -1,207 +1,567 @@
-// this file is a struct, this file is the thread struct
-// threads are going to become "processes" in the future
+// src/kernel/thread.zig
 const std = @import("std");
 const mem = @import("mem.zig");
 const arch = @import("arch");
 const Self = @This();
-pub const NUM_THREADS = 512; // The maximum number of threads that can be created
 
-pub inline fn get_kernel_stack_size() usize {
-    return (mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACKS_END - mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACKS_START) / NUM_THREADS;
-}
+pub const NUM_THREADS = 512;
+pub const THREAD_CLEANUP_VECTOR = 129; // Dedicated interrupt for thread cleanup
 
-pub inline fn get_tid() u64 {
-    tid_counter += 1;
-    return tid_counter;
-}
+// Thread states
+pub const ThreadState = enum {
+    READY, // Ready to run
+    RUNNING, // Currently executing
+    BLOCKED, // Waiting for something
+    ZOMBIE, // Terminated but not cleaned up
+    DEAD, // Completely cleaned up
+};
 
-pub fn find_free_entry() ?usize {
-    for (0..NUM_THREADS) |i| {
-        if (thread_table[i] == null) {
-            return i;
+// Thread priorities
+pub const Priority = enum(u8) {
+    IDLE = 0,
+    LOW = 1,
+    NORMAL = 2,
+    HIGH = 3,
+    KERNEL = 4,
+};
+
+pub const ThreadContext = extern struct {
+    // General purpose registers
+    rax: u64,
+    rbx: u64,
+    rcx: u64,
+    rdx: u64,
+    rsi: u64,
+    rdi: u64,
+    rbp: u64,
+    rsp: u64,
+    r8: u64,
+    r9: u64,
+    r10: u64,
+    r11: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+
+    // Segment registers
+    cs: u64,
+    ds: u64,
+    es: u64,
+    fs: u64,
+    gs: u64,
+    ss: u64,
+
+    // Control registers
+    rip: u64,
+    rflags: u64,
+
+    // FPU/SSE state pointer (allocated separately)
+    fpu_state: [512]u8,
+
+    pub fn log(self: *@This()) void {
+        std.log.info("rax 0x{X:0>16}",.{self.rax});
+        std.log.info("rbx 0x{X:0>16}",.{self.rbx});
+        std.log.info("rcx 0x{X:0>16}",.{self.rcx});
+        std.log.info("rdx 0x{X:0>16}",.{self.rdx});
+        std.log.info("rsi 0x{X:0>16}",.{self.rsi});
+        std.log.info("rdi 0x{X:0>16}",.{self.rdi});
+        std.log.info("rbp 0x{X:0>16}",.{self.rbp});
+        std.log.info("rsp 0x{X:0>16}",.{self.rsp});
+        std.log.info("rip 0x{X:0>16}",.{self.rip});
+    }
+};
+
+pub const Thread = struct {
+    tid: u64,
+    state: ThreadState,
+    priority: Priority,
+
+    // Memory management
+    kernel_stack: []u8,
+    user_stack: ?[]u8,
+    mapper: *mem.Mapper,
+
+    // Context
+    context: ThreadContext,
+    is_kernel: bool,
+
+    // Scheduling
+    time_slice: u32,
+    remaining_time: u32,
+
+    // Lifecycle
+    parent_tid: ?u64,
+    exit_code: ?i32,
+    owning_allocator: std.mem.Allocator,
+
+    // Entry point for user threads
+    entry_point: ?*const fn (*anyopaque) callconv(.C) i32,
+    entry_arg: ?*anyopaque,
+
+    // Linked list for scheduling
+    next: ?*Thread,
+    prev: ?*Thread,
+
+    const ThreadError = error{
+        ThreadingNotInitialized,
+        OutOfMemory,
+        InvalidThreadId,
+        MainThreadAlreadyExists,
+        MainThreadNotKernel,
+        ThreadTableFull,
+        InvalidState,
+        PermissionDenied,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) !void {
+        if (initialized) return;
+
+        // Initialize thread table
+        for (0..NUM_THREADS) |i| {
+            thread_table[i] = null;
         }
+
+        // Initialize lists
+        ready_list = null;
+        zombie_list = null;
+
+        std.log.info("trying to create a cleanup Thread",.{});
+        // Create cleanup thread
+        try createCleanupThread(allocator);
+        std.log.info("Created a cleanup Thread",.{});
+
+        initialized = true;
+    }
+
+    pub fn create(
+        entry_fn: ?*const fn (*anyopaque) callconv(.C) i32,
+        arg: ?*anyopaque,
+        is_kernel: bool,
+        mapper: *mem.Mapper,
+        allocator: std.mem.Allocator,
+        is_main: bool,
+        priority: Priority,
+    ) !*Thread {
+        const thread = try allocator.create(Thread);
+        errdefer allocator.destroy(thread);
+
+        // Find free slot
+        const slot = if (is_main) 0 else findFreeSlot() orelse return ThreadError.ThreadTableFull;
+
+        std.log.info("creating a thread",.{});
+        thread.* = Thread{
+            .tid = if (is_main) 0 else getNextTid(),
+            .state = .READY,
+            .priority = priority,
+            .kernel_stack = undefined,
+            .user_stack = null,
+            .mapper = mapper,
+            .context = std.mem.zeroes(ThreadContext),
+            .is_kernel = is_kernel,
+            .time_slice = getTimeSlice(priority),
+            .remaining_time = 0,
+            .parent_tid = if (current_thread) |ct| ct.tid else null,
+            .exit_code = null,
+            .owning_allocator = allocator,
+            .entry_point = entry_fn,
+            .entry_arg = arg,
+            .next = null,
+            .prev = null,
+        };
+
+        // Allocate kernel stack
+        try allocateKernelStack(thread, slot);
+        // note that we will be moving off the boot stack for the main thread
+        // at this point!
+
+        std.log.info("allocated kernel stack",.{});
+
+        // Allocate user stack if needed
+        if (!is_kernel) {
+            std.log.info("allocating user stack",.{});
+            try allocateUserStack(thread);
+        }
+
+        // Set up initial context
+        std.log.info("setting up context",.{});
+        if(!is_main){
+            try setupInitialContext(thread);
+        } else {
+            try setupInitialContext(thread);
+        }
+        std.log.info("setup context",.{});
+
+        // Add to thread table
+        thread_table[slot] = thread;
+
+        return thread;
+    }
+
+    pub fn yield() void {
+        asm volatile ("int $128"
+            :
+            : [syscall] "{rax}" (@as(u64, 1)),
+            : "memory"
+        );
+    }
+
+    pub fn exit(exit_code: i32) noreturn {
+        asm volatile ("int $128"
+            :
+            : [syscall] "{rax}" (@as(u64, 2)),
+              [code] "{rdi}" (exit_code),
+            : "memory"
+        );
+        unreachable;
+    }
+
+    pub fn createUserThread(entry: *const fn (*anyopaque) callconv(.C) void, arg: ?*anyopaque) !u64 {
+        return asm volatile ("int $128"
+            : [ret] "={rax}" (-> u64),
+            : [syscall] "{rax}" (@as(u64, 3)),
+              [entry] "{rdi}" (entry),
+              [arg] "{rsi}" (arg),
+            : "memory"
+        );
+    }
+
+    pub fn join(tid: u64) !i32 {
+        return asm volatile ("int $128"
+            : [ret] "={rax}" (-> i32),
+            : [syscall] "{rax}" (@as(u64, 4)),
+              [tid] "{rdi}" (tid),
+            : "memory"
+        );
+    }
+};
+
+// Global state
+pub var thread_table: [NUM_THREADS]?*Thread = undefined;
+pub var initialized: bool = false;
+pub var next_tid: u64 = 1;
+pub var current_thread: ?*Thread = null;
+pub var ready_list: ?*Thread = null;
+pub var zombie_list: ?*Thread = null;
+pub var cleanup_thread: ?*Thread = null;
+
+// Cleanup thread stack
+var cleanup_stack: [16 * 1024]u8 align(16) = undefined;
+
+// Helper functions
+inline fn getKernelStackSize() usize {
+    return 1 + (mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACKS_END -
+        mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACKS_START) / NUM_THREADS;
+}
+
+inline fn getNextTid() u64 {
+    defer next_tid += 1;
+    return next_tid;
+}
+
+fn findFreeSlot() ?usize {
+    for (1..NUM_THREADS) |i| { // Skip 0, reserved for main thread
+        if (thread_table[i] == null) return i;
     }
     return null;
 }
 
-
-tid: u64, // the id for the thread, this is used to identify the thread
-kernel_stack: []usize, // the kernel stack for the thread
-user_stack: ?[]usize, // the user stack for the thread
-is_kernel: bool, // is this thread a kernel thread?
-mapper: *mem.Mapper, // the memory mapper for the thread
-owning_allocator: std.mem.Allocator, // the allocator that created this thread
-frame: arch.irq.InterruptFrame, // the interrupt frame for the thread
-
-pub const ThreadError = error{
-    ThreadingNotInitialized,
-    OutOfMemory,
-    InvalidThreadId,
-    MainThreadAlreadyExists,
-    MainThreadNotKernel,
-    ThreadTableFull,
-};
-
-pub fn init() !void {
-    if(initilized) return error.ThreadingNotInitialized;
-    for (0..NUM_THREADS) |i| {
-        // Initialize the thread table with null values
-        thread_table[i] = null;
-    }
-    initilized = true;
+fn getTimeSlice(priority: Priority) u32 {
+    return switch (priority) {
+        .IDLE => 10,
+        .LOW => 20,
+        .NORMAL => 50,
+        .HIGH => 100,
+        .KERNEL => 200,
+    };
 }
 
-// Called by pushing the arg onto the stack. before the context frame.
-// this will be resolved at comptime by the anytype
-const EntryFn = *const fn(arg: anytype ) void;
+fn allocateKernelStack(thread: *Thread, slot: usize) !void {
+    const stack_start = mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACKS_START +
+        (getKernelStackSize() * slot);
+    const stack_size = getKernelStackSize();
 
-pub fn create(entry_fn: EntryFn, arg: anytype, is_kernel: bool, mapper: *mem.Mapper, allocator: std.mem.Allocator, is_main: bool) !*Self {
-    var result = try allocator.create(Self);
-    errdefer allocator.destroy(result);
-
-    // find free tid(!)
-    // find free entry in the thread table. otherwise add to list to be added later
-
-    // if we are the main thread, we need to set the tid to 0
-    // also we will not allocate a kernel stack for the main thread as it has one.
-    // else find the kernel stack that associated with this thread (from the thread table)
-
-    if(is_main) {
-        if (!is_kernel) {
-            return error.MainThreadNotKernel; // Main thread must be a kernel thread
-        }
-        result.tid = 0; // Main thread always has tid 0
-        const kernel_stack_start = mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_START;
-        const kernel_stack_end = mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACK_END;
-        const kernel_stack_size = kernel_stack_end - kernel_stack_start;
-        const ptr:[*]usize = @ptrFromInt(kernel_stack_start);
-        const kernel_stack: []usize = ptr[0..kernel_stack_size / @sizeOf(usize)];
-        result.kernel_stack = kernel_stack;
-    } else {
-        result.tid = get_tid(); // Get a new thread ID
-        const free_entry = find_free_entry();
-        if (free_entry == null) {
-            // TODO add to the list to be added later
-            return .ThreadTableFull; // No free entry in the thread table
-        }
-        const slot = free_entry.?; // Unwrap the optional
-        const kernel_stack_start = mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_STACKS_START + (get_kernel_stack_size() * (slot));
-        const ptr:[*]usize = @ptrFromInt(kernel_stack_start);
-        const kernel_stack: []usize = ptr[0..get_kernel_stack_size() / @sizeOf(usize)];
-        result.kernel_stack = kernel_stack;
-        thread_table[free_entry.?] = result.tid; // Mark this entry as used
-    }
-
-    // if a user thread, we need to allocate a user stack for the thread
-    // TODO @(dleiferives,93db9a3f-de9f-4e07-aba8-61c2862f00f9): Make this
-    // dynamically increased in size! ~#
-    // this will be dynamically increased as needed.
-    // for now we will use a fixed size stack (same size as the kernel stack)
-    // map the region to the user stack
-    if(!is_kernel){
-        const user_stack_start = mem.types.MEMORY_LAYOUT.USER_VIRTUAL_STACK_END - get_kernel_stack_size();
-        _ = try mapper.mapDemandRange(
-            user_stack_start,
-            get_kernel_stack_size(),
-            mem.PageFlags{
-                .execute_disable = true,
-                .write = true,
-                .read = true,
-                .user = true,
-                .present = true,
-            },
-        );
-
-        const user_stack_pre_ptr:[*]usize = @ptrFromInt(user_stack_start);
-        const user_stack: []usize = user_stack_pre_ptr[0..get_kernel_stack_size() / @sizeOf(usize)];
-        result.user_stack = user_stack;
-    } else {
-        result.user_stack = null; // Kernel threads do not have a user stack
-    }
-
-    // now we have to setup the frame and such
-
-    return result;
-}
-
-
-pub var thread_table: [NUM_THREADS]?usize = undefined; // The table of threads
-pub var initilized: bool = false;
-pub var waiting_for_thread_table_slot: Queue(Self) = undefined;
-pub var tid_counter: u64 = 1; // Global thread ID counter
-
-pub fn Queue(comptime T: type) type {
-    return struct {
-        head: ?*Node = null,
-        tail: ?*Node = null,
-
-        const Node = struct {
-            data: T,
-            next: ?*Node = null,
-        };
-
-        const Iterator = struct {
-            cursor: ?*Node = null,
-
-            pub fn next(self: *@This()) ?T{
-                if (self.cursor) |cur| {
-                    self.cursor = cur.next;
-                    return cur.data;
-                }
-                return null;
-            }
-        };
-
-        pub fn enqueue(self: *Self, value: T, allocator: *std.mem.Allocator) !void {
-            const node = try allocator.create(Node);
-            node.* = Node{ .data = value, .next = null };
-            if (self.tail) |tail| {
-                tail.next = node;
-            } else {
-                self.head = node;
-            }
-            self.tail = node;
-        }
-
-        pub fn dequeue(self: *Self, allocator: *std.mem.Allocator) ?T {
-            const node = self.head orelse return null;
-            defer allocator.destroy(node);
-            self.head = node.next;
-            if (self.head == null) self.tail = null;
-            return node.data;
-        }
-
-        pub fn peek(self: *Self) ?T{
-            return self.head;
-        }
-
-        pub fn remove(self: *Self, item: T, allocator: *std.mem.Allocator) !bool{
-            var prev: ?*Node = null;
-            var curr = self.head;
-
-            while (curr) |node| {
-                if (node.data == item) {
-                    if (prev) |p| {
-                        p.next = node.next;
-                    } else {
-                        self.head = node.next;
-                    }
-
-                    if (self.tail == node) {
-                        self.tail = prev;
-                    }
-
-                    try allocator.destroy(node);
-                    return true;
-                }
-                prev = curr;
-                curr = node.next;
-            }
-            return false;
-        }
-
-        pub fn toIterator(self: *Self) Iterator {
-            return Iterator{.cursor = self.head};
+    std.log.info("Creating kernel stack",.{});
+    // Allocate virtual memory for kernel stack
+    thread.mapper.mapRange(stack_start, stack_start + stack_size, mem.PageFlags{
+        .present = true,
+        .writable = true,
+        .user_accessible = false,
+        .demand_alloc = false,
+    }) catch |err| {
+        switch(err) {
+            error.AlreadyMapped => {},
+            else => {return err;}
         }
     };
+
+    const ptr: [*]u8 = @ptrFromInt(stack_start);
+    thread.kernel_stack = ptr[0..stack_size];
+}
+
+fn allocateUserStack(thread: *Thread) !void {
+    const stack_size = 2 * 1024 * 1024; // 2MB user stack
+    const stack_start = mem.types.MEMORY_LAYOUT.USER_VIRTUAL_STACK_INITIAL_START - stack_size;
+
+    _ = try thread.mapper.mapDemandRange(
+        stack_start,
+        stack_size,
+        mem.PageFlags{
+            .present = true,
+            .writable = true,
+            .user_accessible = true,
+            .execute_disable = true,
+            .demand_alloc = true,
+        },
+    );
+
+    const ptr: [*]u8 = @ptrFromInt(stack_start);
+    thread.user_stack = ptr[0..stack_size];
+}
+
+// Update setupInitialContext in thread.zig
+fn setupInitialContext(thread: *Thread) !void {
+    // Set up stack pointers
+    if (thread.is_kernel) {
+        std.log.info("context is kernel",.{});
+        // Kernel thread setup
+        const stack_top = @intFromPtr(thread.kernel_stack.ptr) + thread.kernel_stack.len;
+        thread.context.rsp = stack_top - 16; // Leave some space
+        thread.context.cs = arch.cpu.gdt.SELECTOR.KERNEL_CODE;
+        thread.context.ds = arch.cpu.gdt.SELECTOR.KERNEL_DATA;
+        thread.context.ss = arch.cpu.gdt.SELECTOR.KERNEL_DATA;
+
+        // If this has an entry point, set up a wrapper
+        if (thread.entry_point) |entry| {
+
+            std.log.info("setup entrypoint ",.{});
+            thread.context.rip = @intFromPtr(&kernelThreadWrapper);
+            // Push entry point and args onto stack for wrapper
+            thread.context.rdi = @intFromPtr(entry);
+            // std.log.info("accessintg stack {*}",.{stack_ptr});
+            // stack_ptr[0] = @intFromPtr(entry);
+            // std.log.info("wrote ",.{});
+            // stack_ptr[1] = @intFromPtr(thread.entry_arg orelse @as(*allowzero anyopaque, @ptrFromInt(0)));
+            // std.log.info("done stack",.{});
+            // std.log.info("stack entry 0 {*} 1 {*}",.{&stack_ptr[0],&stack_ptr[1]});
+            // thread.context.rsp -= 16; // Adjust for pushed values
+        }
+
+        std.log.info("end kernel specific ",.{});
+    } else {
+        std.log.info("context is user",.{});
+        // User thread setup
+        if (thread.user_stack) |stack| {
+            const stack_top = @intFromPtr(stack.ptr) + stack.len;
+            thread.context.rsp = stack_top - 16;
+        }
+        thread.context.cs = arch.cpu.gdt.SELECTOR.USER_CODE;
+        thread.context.ds = arch.cpu.gdt.SELECTOR.USER_DATA;
+        thread.context.ss = arch.cpu.gdt.SELECTOR.USER_DATA;
+
+        if (thread.entry_point) |entry| {
+            thread.context.rip = @intFromPtr(&userThreadWrapper);
+
+            // Set up user stack with entry point
+            const stack_ptr = @as([*]u64, @ptrFromInt(thread.context.rsp));
+            stack_ptr[0] = @intFromPtr(entry);
+            stack_ptr[1] = @intFromPtr(thread.entry_arg orelse @as(*allowzero anyopaque, @ptrFromInt(0)));
+            thread.context.rsp -= 16;
+        }
+    }
+
+    std.log.info("rflags setting fpu",.{});
+    // Enable interrupts
+    thread.context.rflags = 0x202; // IF flag set
+}
+
+// Thread wrapper functions
+pub fn kernelThreadWrapper() callconv(.C) noreturn {
+    // Get entry point and args from stack
+
+    const entry_raw: u64= asm volatile ("mov %%rdi, %[rdi]" : [rdi] "=r" (-> u64));
+    const arg_raw: u64= asm volatile ("mov %%rsi, %[rsi]" : [rsi] "=r" (-> u64));
+    std.log.info("entry raw i 0x{X:0>16}",.{entry_raw});
+
+    const entry_fn: *const fn (*allowzero anyopaque) callconv(.C) i32 = @ptrFromInt(entry_raw);
+    const arg: *allowzero anyopaque = @ptrFromInt(arg_raw);
+    // Call the actual thread function
+
+    // Thread finished, exit
+    Thread.exit(entry_fn(arg));
+}
+
+fn userThreadWrapper() callconv(.C) noreturn {
+    // Similar to kernel wrapper but for user threads
+    const rsp = asm volatile ("mov %%rsp, %[rsp]" : [rsp] "=r" (-> u64));
+    const stack_ptr = @as([*]u64, @ptrFromInt(rsp));
+
+    const entry_fn = @as(*const fn(*anyopaque) callconv(.C) void, @ptrFromInt(stack_ptr[2]));
+    const arg = @as(*anyopaque, @ptrFromInt(stack_ptr[3]));
+
+    // Call the actual thread function
+    entry_fn(arg);
+
+    // Thread finished, exit
+    Thread.exit(0);
+}
+
+pub fn removeFromReadyList(thread: *Thread) void {
+    if (thread.prev) |prev| {
+        prev.next = thread.next;
+    } else {
+        ready_list = thread.next;
+    }
+
+    if (thread.next) |next| {
+        next.prev = thread.prev;
+    }
+
+    thread.next = null;
+    thread.prev = null;
+}
+
+pub fn addToZombieList(thread: *Thread) void {
+    thread.state = .ZOMBIE;
+    thread.next = zombie_list;
+    zombie_list = thread;
+}
+
+pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFrame) void {
+    std.log.debug("Context switch: {any} -> {any}", .{
+        if (from) |f| f.tid else @as(u64, 0),
+        to.tid
+    });
+
+    // Save current context if there is one
+    if (from) |old_thread| {
+        // Save current register state
+        old_thread.context = frame.toThreadContext();
+        // saveContext(&old_thread.context);
+    }
+
+    // Switch to new thread's address space if different
+    if (from == null or from.?.mapper != to.mapper) {
+        mem.Mapper.loadPML4(to.mapper.pml4_phys_addr);
+    }
+
+    // Update current thread pointer
+    // current_thread = to;
+    to.state = .RUNNING;
+
+    // Update TSS for kernel stack
+    // arch.cpu.gdt.setKernelStack(@intFromPtr(to.kernel_stack.ptr) + to.kernel_stack.len);
+
+    // Load new context and jump to thread
+    std.log.debug("switching context!",.{});
+    loadContext(&to.context);
+}
+
+
+
+
+
+// Context switching assembly functions
+pub extern fn saveContext(ctx: *ThreadContext) void;
+pub extern fn loadContext(ctx: *ThreadContext) noreturn;
+
+// Cleanup thread
+fn createCleanupThread(allocator_owner: std.mem.Allocator) !void {
+    const allocator = allocator_owner;
+    cleanup_thread = try allocator.create(Thread);
+
+    cleanup_thread.?.* = Thread{
+        .tid = 0xFFFFFFFFFFFFFFFF, // Special TID for cleanup thread
+        .state = .READY,
+        .priority = .KERNEL,
+        .kernel_stack = cleanup_stack[0..],
+        .user_stack = null,
+        .mapper = undefined, // Will be set later
+        .context = std.mem.zeroes(ThreadContext),
+        .is_kernel = true,
+        .time_slice = 1000,
+        .remaining_time = 0,
+        .parent_tid = null,
+        .exit_code = null,
+        .owning_allocator = allocator,
+        .entry_point = null,
+        .entry_arg = null,
+        .next = null,
+        .prev = null,
+    };
+
+    // Set up cleanup thread context
+    cleanup_thread.?.context.rsp = @intFromPtr(&cleanup_stack) + cleanup_stack.len - 16;
+    cleanup_thread.?.context.rip = @intFromPtr(&cleanupThreadEntry);
+    cleanup_thread.?.context.cs = arch.cpu.gdt.SELECTOR.KERNEL_CODE;
+    cleanup_thread.?.context.ds = arch.cpu.gdt.SELECTOR.KERNEL_DATA;
+    cleanup_thread.?.context.ss = arch.cpu.gdt.SELECTOR.KERNEL_DATA;
+    cleanup_thread.?.context.rflags = 0x202;
+}
+
+fn cleanupThreadEntry() callconv(.C) noreturn {
+    while (true) {
+        // Process zombie list
+        while (zombie_list) |zombie| {
+            zombie_list = zombie.next;
+            cleanupThread(zombie);
+        }
+
+        // Sleep until needed
+        asm volatile ("hlt");
+    }
+}
+
+fn cleanupThread(thread: *Thread) void {
+    // Free user stack if exists
+    if (thread.user_stack) |stack| {
+        const start = @intFromPtr(stack.ptr);
+        const end = start + stack.len;
+        thread.mapper.unmapAndFreeRangeFull(start, end) catch {};
+    }
+
+    // Free kernel stack
+    const start = @intFromPtr(thread.kernel_stack.ptr);
+    const end = start + thread.kernel_stack.len;
+    thread.mapper.unmapAndFreeRangeFull(start, end) catch {};
+
+    // Free FPU state
+    if (thread.context.fpu_state) |fpu| {
+        thread.owning_allocator.destroy(fpu);
+    }
+
+    // Remove from thread table
+    for (thread_table, 0..) |entry, i| {
+        if (entry == thread) {
+            thread_table[i] = null;
+            break;
+        }
+    }
+
+    // Free thread structure
+    thread.owning_allocator.destroy(thread);
+}
+
+pub fn triggerCleanup() void {
+    // Trigger cleanup interrupt
+    asm volatile ("int $129");
+}
+
+// Public interface
+pub fn setCurrentThread(t: *Thread) void {
+    current_thread = t;
+}
+
+pub fn getCurrentThread() ?*Thread {
+    return current_thread;
+}
+
+
+pub fn getThreadByTid(tid: u64) ?*Thread {
+    for (thread_table) |entry| {
+        if (entry) |thread| {
+            if (thread.tid == tid) return thread;
+        }
+    }
+    return null;
 }

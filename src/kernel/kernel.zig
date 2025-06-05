@@ -4,6 +4,9 @@ const mem = @import("mem.zig");
 const multiboot = @import("multiboot.zig");
 const arch = @import("arch");
 const config = @import("config");
+pub const thread = @import("thread.zig");
+pub const syscall = @import("syscall.zig");
+const scheduler = @import("scheduler.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -157,12 +160,92 @@ pub fn main() !void {
     if (state.testing.map_dispatch) {
         try testDemandPaging();
     }
+
     log.info("Kernel loaded", .{});
-    while(true) {
-        // Main loop of the kernel
-        // Here we can handle interrupts, tasks, etc.
-        // For now, just sleep
+    log.info("Setting up threading", .{});
+    state.scheduler = (try scheduler.RoundRobinScheduler.init(
+        state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
+        1000,
+)).scheduler();
+    arch.irq.exceptions.initThreading();
+
+    const ctx = try state.kernel_heap.?.allocator().create(thread.ThreadContext);
+    log.info("saving context",.{});
+    thread.saveContext(ctx);
+    log.info("starting to log context",.{});
+    ctx.log();
+    // ctx.rip = @intFromPtr(&testKernelThread);
+    // thread.loadContext(ctx);
+
+    const main_thread = thread.Thread.create(
+        &kernelThreadMain,
+        @ptrFromInt(10),
+        true, // Kernel thread
+        state.mem_manager.mapper.?, // Use the kernel's address space
+        state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
+        true,
+        .KERNEL,
+    ) catch |err| {
+        log.err("Failed to create kernel thread: {}", .{err});
+        return err;
+    };
+
+
+    const test_thread = thread.Thread.create(
+        &testKernelThread,
+        @ptrFromInt(10),
+        true, // Kernel thread
+        state.mem_manager.mapper.?, // Use the kernel's address space
+        state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
+        false,
+        .KERNEL,
+    ) catch |err| {
+        log.err("Failed to create kernel thread: {}", .{err});
+        return err;
+    };
+    // state.scheduler.?.current_thread = main_thread;
+
+    try state.scheduler.?.addThread(main_thread);
+    try state.scheduler.?.addThread(test_thread);
+
+    thread.Thread.yield();
+
+    // begin testing for threading
+    while(true){
         arch.cpu.halt();
+    }
+}
+
+
+fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32{
+    _ = arg;
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        log.info("Test kernel thread: iteration {}", .{i});
+
+        // Do some work
+        var j: u32 = 0;
+        while (j < 1000000) : (j += 1) {
+            asm volatile ("" ::: "memory"); // Prevent optimization
+        }
+
+        if (i % 10 == 0) {
+            thread.Thread.yield(); // Yield every 10 iterations
+        }
+    }
+    log.info("Test kernel thread exiting", .{});
+    return -1;
+}
+
+pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
+    _ = arg;
+
+    var i: u64 = 0;
+    while(true){
+        log.info("idle loop {}",.{i});
+        thread.Thread.yield();
+        arch.cpu.halt();
+        i+=1;
     }
 }
 
@@ -192,6 +275,7 @@ pub const Kernel = struct {
     mem_manager: *mem.Manager,
     multiboot_info: multiboot.Multiboot2Info,
     kernel_heap: ?mem.allocator.FreeListAllocator = null,
+    scheduler: ?scheduler.Scheduler = null,
 
     pub inline fn mem_layout_init(self: *Kernel) !void {
         if (self.initilized.mem_layout) {
@@ -377,7 +461,7 @@ pub const ALL_SCOPES = [_]LogScope{
     .mem_allocator,
     .mem_allocator_verbose,
     .irq,
-    // .irq_page_fault,
+    .irq_page_fault,
     .drivers_vga,
     .drivers_serial_log,
     .drivers_ps2,

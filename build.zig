@@ -185,6 +185,7 @@ pub fn build(b: *std.Build) void {
 
     // arch.addImport("core",core);
     arch.addImport("kernel",kernel);
+    arch.addAssemblyFile(b.path("src/arch/x86_64/context_switch.S"));
 
     // TODO @(dleiferives,e310b4ad-095c-48ad-80fe-3b7d400194a6): move multiboot
     // header and stuff to core ~#

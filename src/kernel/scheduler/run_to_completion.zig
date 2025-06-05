@@ -1,4 +1,4 @@
-// src/kernel/schedulers/round_robin.zig
+// src/kernel/schedulers/run_to_completion.zig
 const std = @import("std");
 const thread_s = @import("../thread.zig");
 const scheduler = @import("../scheduler.zig");
@@ -8,22 +8,20 @@ const SchedulerError = scheduler.SchedulerError;
 const SchedulerStats = scheduler.SchedulerStats;
 const SchedulerVTable = scheduler.SchedulerVTable;
 
-pub const RoundRobinScheduler = struct {
-    ready_queue: std.DoublyLinkedList(*Thread),
-    current_time_slice: u32,
-    default_time_slice: u32,
+pub const RunToCompletionScheduler = struct {
+    ready_queue: ?*Thread,
+    queue_tail: ?*Thread,
     total_threads: u32,
     context_switches: u64,
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, time_slice: u32) !*Self {
+    pub fn init(allocator: std.mem.Allocator) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
-            .ready_queue = std.DoublyLinkedList(*Thread){},
-            .current_time_slice = time_slice,
-            .default_time_slice = time_slice,
+            .ready_queue = null,
+            .queue_tail = null,
             .total_threads = 0,
             .context_switches = 0,
             .allocator = allocator,
@@ -35,8 +33,7 @@ pub const RoundRobinScheduler = struct {
         return Scheduler{
             .ptr = self,
             .vtable = &vtable,
-            .scheduler_type = .RoundRobin,
-            .current_thread = null,
+            .scheduler_type = .RunToCompletion,
         };
     }
 
@@ -54,48 +51,62 @@ pub const RoundRobinScheduler = struct {
     fn addThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Create node and add to end of queue
-        const node = self.allocator.create(std.DoublyLinkedList(*Thread).Node) catch {
-            return SchedulerError.OutOfMemory;
-        };
-        node.data = thread;
+        // Add to end of queue (FIFO)
+        thread.next = null;
+        thread.prev = self.queue_tail;
 
-        self.ready_queue.append(node);
+        if (self.queue_tail) |tail| {
+            tail.next = thread;
+            self.queue_tail = thread;
+        } else {
+            self.ready_queue = thread;
+            self.queue_tail = thread;
+        }
+
         self.total_threads += 1;
         thread.state = .READY;
-        thread.remaining_time = self.default_time_slice;
+        thread.remaining_time = std.math.maxInt(u32); // Infinite time slice
     }
 
     fn removeThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Find and remove the thread from the queue
-        var it = self.ready_queue.first;
-        while (it) |node| {
-            if (node.data == thread) {
-                self.ready_queue.remove(node);
-                self.allocator.destroy(node);
-                if (self.total_threads > 0) {
-                    self.total_threads -= 1;
-                }
-                return;
-            }
-            it = node.next;
+        if (thread.prev) |prev| {
+            prev.next = thread.next;
+        } else {
+            self.ready_queue = thread.next;
+        }
+
+        if (thread.next) |next| {
+            next.prev = thread.prev;
+        } else {
+            self.queue_tail = thread.prev;
+        }
+
+        thread.next = null;
+        thread.prev = null;
+
+        if (self.total_threads > 0) {
+            self.total_threads -= 1;
         }
     }
 
     fn selectNext(ptr: *anyopaque) ?*Thread {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Pop from front of queue
-        if (self.ready_queue.popFirst()) |node| {
-            const thread = node.data;
+        if (self.ready_queue) |thread| {
+            // Remove from front (FIFO)
+            self.ready_queue = thread.next;
+            if (self.ready_queue) |next| {
+                next.prev = null;
+            } else {
+                self.queue_tail = null;
+            }
 
-            // Add back to end of queue (round robin behavior)
-            self.ready_queue.append(node);
-
+            thread.next = null;
+            thread.prev = null;
             thread.state = .RUNNING;
-            thread.remaining_time = self.default_time_slice;
+            thread.remaining_time = std.math.maxInt(u32);
             self.context_switches += 1;
 
             return thread;
@@ -105,24 +116,17 @@ pub const RoundRobinScheduler = struct {
     }
 
     fn timerTick(ptr: *anyopaque, current_thread: ?*Thread) bool {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        _ = self;
-
-        if (current_thread) |thread| {
-            if (thread.remaining_time > 0) {
-                thread.remaining_time -= 1;
-                return thread.remaining_time == 0;
-            }
-        }
-
+        _ = ptr;
+        _ = current_thread;
+        // Never preempt on timer tick in run-to-completion
         return false;
     }
 
     fn shouldPreempt(ptr: *anyopaque, current_thread: *Thread) bool {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-
-        // Preempt if time slice expired and there are other threads waiting
-        return current_thread.remaining_time == 0 and self.ready_queue.len > 0;
+        _ = ptr;
+        _ = current_thread;
+        // Never preempt in run-to-completion
+        return false;
     }
 
     fn getStats(ptr: *anyopaque) SchedulerStats {
@@ -130,32 +134,23 @@ pub const RoundRobinScheduler = struct {
 
         return SchedulerStats{
             .total_threads = self.total_threads,
-            .ready_threads = @intCast(self.ready_queue.len),
+            .ready_threads = self.total_threads,
             .context_switches = self.context_switches,
-            .scheduler_type = .RoundRobin,
+            .scheduler_type = .RunToCompletion,
         };
     }
 
     fn reset(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Clean up all nodes
-        while (self.ready_queue.popFirst()) |node| {
-            self.allocator.destroy(node);
-        }
-
+        self.ready_queue = null;
+        self.queue_tail = null;
         self.total_threads = 0;
         self.context_switches = 0;
     }
 
     fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-
-        // Clean up any remaining nodes
-        while (self.ready_queue.popFirst()) |node| {
-            self.allocator.destroy(node);
-        }
-
         allocator.destroy(self);
     }
 };

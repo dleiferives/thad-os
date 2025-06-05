@@ -3,6 +3,8 @@ const kernel= @import("kernel");
 const cpu = @import("cpu.zig");
 const pf_log = std.log.scoped(.irq_page_fault);
 const irq_log = std.log.scoped(.irq);
+const thread = kernel.thread;
+const syscall = kernel.syscall;
 
 
 /// Interrupt vector enum, just a helper lol
@@ -43,6 +45,7 @@ pub const Vector = enum(u8) {
     // thread_exit as a syscall that calls a trap, which then does the thread
     // deallocation ~#
     syscall = 128,
+    thread_cleanup = 129,
 
     pub fn toValue(self: Vector) u8 {
         return @intFromEnum(self);
@@ -53,7 +56,7 @@ pub const Vector = enum(u8) {
             0,1,2,3,4,5,6,7,8,10,11,12,13,14,
             16,17,18,19,20,21,32,33,34,35,36,
             37,38,39,40,41,42,43,44,45,46,47,
-            128 => return @enumFromInt(value),
+            128,129 => return @enumFromInt(value),
             else => return null,
         }
     }
@@ -89,6 +92,36 @@ pub const InterruptFrame = extern struct {
     rflags: u64,
     rsp: u64,
     ss: u64,
+
+    pub fn toThreadContext(self: @This()) thread.ThreadContext{
+        return .{
+            .rax = self.rax,
+            .rbx = self.rbx,
+            .rcx = self.rcx,
+            .rdx = self.rdx,
+            .rsi = self.rsi,
+            .rdi = self.rdi,
+            .rbp = self.rbp,
+            .rsp = self.rsp,
+            .r8 = self.r8,
+            .r9 = self.r9,
+            .r10 = self.r10,
+            .r11 = self.r11,
+            .r12 = self.r12,
+            .r13 = self.r13,
+            .r14 = self.r14,
+            .r15 = self.r15,
+            .cs = self.cs,
+            .ds = self.ds,
+            .es = self.es,
+            .fs = self.fs,
+            .gs = self.gs,
+            .ss = self.ss,
+            .rip = self.rip,
+            .rflags = self.rflags,
+            .fpu_state = undefined,
+        };
+    }
 };
 
 // The interrupt handler function!
@@ -378,6 +411,25 @@ pub const exceptions = struct {
         }.handler;
     }
 
+    fn syscallHandler(frame: *InterruptFrame) void {
+        std.log.debug("syscall handler",.{});
+        syscall.handleSyscall(frame);
+    }
+
+    fn cleanupHandler(frame: *InterruptFrame) void {
+        std.log.debug("cleanup handler",.{});
+
+        if (thread.cleanup_thread) |cleanup| {
+            if (thread.getCurrentThread()) |current| {
+                if (current != cleanup) {
+                    thread.switchContext(current, cleanup,frame);
+                }
+            }
+        }
+    }
+
+
+
     pub fn init() void {
         dispatcher.register(.divide_error, genericException("Divide Error"));
         dispatcher.register(.debug, genericException("Debug"));
@@ -400,6 +452,12 @@ pub const exceptions = struct {
         dispatcher.register(.virtualization, genericException("Virtualization"));
         dispatcher.register(.control_protection, genericException("Control Protection"));
     }
+
+    pub fn initThreading() void{
+        dispatcher.register(.syscall, syscallHandler);
+        dispatcher.register(@enumFromInt(thread.THREAD_CLEANUP_VECTOR), cleanupHandler);
+    }
+
 };
 
 pub const irq = struct {
