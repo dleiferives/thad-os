@@ -41,26 +41,28 @@ pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
     }
 }
 
+const yield_log = std.log.scoped(.thread_yield);
+
 fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
     // _ = frame;
-    std.log.debug("Thread yield syscall invoked", .{});
+    yield_log.debug("Thread yield syscall invoked", .{});
     if (kernel.state.scheduler) |*scheduler| {
         const stats = scheduler.getStats();
         const thread_count = stats.total_threads;
-        std.log.info("Yielding thread, total threads: {}", .{thread_count});
+        yield_log.info("Yielding thread, total threads: {}", .{thread_count});
         if (thread_count > 1){
             const current_thread = scheduler.current_thread;
             const next_thread = scheduler.selectNext() orelse {
-                std.log.err("No next thread to switch to", .{});
+                yield_log.err("No next thread to switch to", .{});
                 return;
             };
             if (current_thread == null){
-                std.log.err("No current thread to yield", .{});
+                yield_log.err("No current thread to yield", .{});
 
             }else{
                 // current_thread.?.context = frame.toThreadContext();
             }
-            std.log.info("Switching from thread {} to thread {}", .{if (current_thread) |t| t.tid else 9999, next_thread.tid});
+            yield_log.info("Switching from thread {} to thread {}", .{if (current_thread) |t| t.tid else 9999, next_thread.tid});
             // Do the context switch
             scheduler.current_thread = next_thread;
             thread.switchContext(current_thread, next_thread, frame);
@@ -69,20 +71,32 @@ fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
                 // this is a unique case where we have only one thread running
                 // we just need to switch to the next thread
                 const next_thread = scheduler.selectNext() orelse {
-                    std.log.err("No next thread to switch to", .{});
+                    yield_log.err("No next thread to switch to", .{});
                     return;
                 };
                 scheduler.current_thread = next_thread;
+                thread.setCurrentThread(next_thread);
                 thread.loadContext(&next_thread.context);
             }
-            std.log.err("Only one thread running, yielding does nothing", .{});
-            scheduler.current_thread = scheduler.selectNext() orelse {
-                std.log.err("No current thread to yield", .{});
+            yield_log.err("Only one thread running, yielding does nothing", .{});
+            const next = scheduler.selectNext() orelse {
+                yield_log.err("No current thread to yield", .{});
                 return;
             };
+            const current_thread = thread.getCurrentThread() orelse {
+                yield_log.err("No current thread to yield", .{});
+                return;
+            };
+            if (current_thread != next){
+                scheduler.current_thread = next;
+                thread.switchContext(current_thread, next, frame);
+            } else {
+                current_thread.context = frame.toThreadContext();
+                thread.loadContext(&current_thread.context);
+            }
         }
     } else {
-        std.log.err("No scheduler available, yielding does nothing", .{});
+        yield_log.err("No scheduler available, yielding does nothing", .{});
     }
 }
 
@@ -117,7 +131,7 @@ fn handleThreadExit(frame: *arch.irq.InterruptFrame) void {
             std.log.err("No current thread to exit from, returning with code: {}", .{exit_code});
             frame.rax = @intFromError(SyscallError.InvalidArgument);
             const next = sched.selectNext() orelse {
-                std.log.err("No next thread to switch to, returning with code: {}", .{exit_code});
+                // std.log.err("No next thread to switch to, returning with code: {}", .{exit_code});
                 frame.rax = @intFromError(SyscallError.ResourceUnavailable);
                 return;
             };
@@ -126,7 +140,7 @@ fn handleThreadExit(frame: *arch.irq.InterruptFrame) void {
             return;
         }
     } else {
-        std.log.err("No scheduler available, cannot exit thread", .{});
+        // std.log.err("No scheduler available, cannot exit thread", .{});
         frame.rax = @intFromError(SyscallError.ResourceUnavailable);
         return;
     }

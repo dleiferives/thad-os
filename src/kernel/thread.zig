@@ -11,9 +11,12 @@ pub const THREAD_CLEANUP_VECTOR = 129; // Dedicated interrupt for thread cleanup
 pub const ThreadState = enum {
     READY, // Ready to run
     RUNNING, // Currently executing
-    BLOCKED, // Waiting for something
     ZOMBIE, // Terminated but not cleaned up
     DEAD, // Completely cleaned up
+    BLOCKED_IO,
+    BLOCKED_MUTEX,
+    BLOCKED_KEYBOARD,
+    BLOCKED_GENERAL,
 };
 
 // Thread priorities
@@ -99,6 +102,10 @@ pub const Thread = struct {
     // Entry point for user threads
     entry_point: ?*const fn (*anyopaque) callconv(.C) i32,
     entry_arg: ?*anyopaque,
+
+    // Linked list pointers for scheduling blocks
+    next_blocked: ?*Thread = null,
+    prev_blocked: ?*Thread = null,
 
     const ThreadError = error{
         ThreadingNotInitialized,
@@ -229,6 +236,26 @@ pub const Thread = struct {
               [tid] "{rdi}" (tid),
             : "memory"
         );
+    }
+
+    pub fn blockOn(queue: *@import("thread_queue.zig").ThreadQueue, enable_interrupts: bool) void {
+        if (getCurrentThread()) |current| {
+            arch.irq.irq.disable();
+            current.state = .BLOCKED_GENERAL;
+            queue.enqueue(current);
+
+            // Remove from scheduler
+            const kernel = @import("kernel.zig");
+            if (kernel.state.scheduler) |sched| {
+                sched.removeThread(current) catch {};
+            }
+
+            if (enable_interrupts) {
+                arch.irq.irq.enable();
+            }
+
+            Thread.yield();
+        }
     }
 };
 
@@ -437,7 +464,7 @@ pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFram
     }
 
     // Update current thread pointer
-    // current_thread = to;
+    current_thread = to;
     to.state = .RUNNING;
 
     // Update TSS for kernel stack

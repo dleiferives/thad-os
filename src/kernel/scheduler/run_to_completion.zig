@@ -60,8 +60,6 @@ pub const RunToCompletionScheduler = struct {
     fn removeThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // To remove a thread, we must find it in the list first.
-        // This is an O(n) operation, a trade-off for a non-intrusive list.
         for (self.ready_queue.items, 0..) |t, i| {
             if (t == thread) {
                 _ = self.ready_queue.orderedRemove(i);

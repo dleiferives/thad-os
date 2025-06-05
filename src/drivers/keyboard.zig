@@ -5,9 +5,13 @@ const Ps2Controller = Ps2ControllerModule.Ps2Controller;
 const ps2 = Ps2ControllerModule.ps2;
 const Ps2Error = Ps2ControllerModule.Ps2Error;
 const DeviceType = Ps2ControllerModule.DeviceType;
-
 const log = std.log.scoped(.drivers_keyboard);
 const log_verbose = std.log.scoped(.drivers_keyboard_verbose);
+
+const kernel = @import("kernel");
+const Mutex = kernel.mutex.Mutex;
+const ThreadQueue = kernel.thread_queue.ThreadQueue;
+const thread = kernel.thread;
 
 // Based on common Scan Code Set 2 values.
 // TODO @(dleiferives,794619e9-698f-40b4-8108-2bad486f7e48): add all of the
@@ -655,3 +659,111 @@ pub fn setup_irq(ctrl: *Ps2Controller, mgr: *KeyboardManager) !void {
     kbd_mgr  = mgr;
     try arch.irq.irq.registerIrq(1, irq1Handler);
 }
+
+
+
+pub const KeyboardBuffer = struct {
+    buffer: [256]u8 = [_]u8{0} ** 256,
+    read_pos: u8 = 0,
+    write_pos: u8 = 0,
+    blocked_readers: ThreadQueue = .{},
+    buffer_mutex: Mutex = .{},
+
+    pub fn init() KeyboardBuffer {
+        return .{};
+    }
+
+    pub fn hasData(self: *KeyboardBuffer) bool {
+        return self.read_pos != self.write_pos;
+    }
+
+    pub fn putChar(self: *KeyboardBuffer, ch: u8) void {
+        arch.irq.irq.disable();
+        defer arch.irq.irq.enable();
+
+        const next_write = (self.write_pos +% 1);
+        if (next_write != self.read_pos) {
+            self.buffer[self.write_pos] = ch;
+            self.write_pos = next_write;
+
+            // Unblock one waiting reader
+            self.blocked_readers.unblockOne();
+        }
+    }
+
+    pub fn getChar(self: *KeyboardBuffer) u8 {
+        arch.irq.irq.disable();
+
+        while (self.read_pos == self.write_pos) {
+            if (thread.getCurrentThread()) |current| {
+                current.state = .BLOCKED_KEYBOARD;
+                self.blocked_readers.enqueue(current);
+
+                // Remove from scheduler
+                if (kernel.state.scheduler) |sched| {
+                    sched.removeThread(current) catch {};
+                }
+
+                arch.irq.irq.enable();
+                thread.Thread.yield();
+                arch.irq.irq.disable();
+            } else {
+                arch.irq.irq.enable();
+                return 0;
+            }
+        }
+
+        const ch = self.buffer[self.read_pos];
+        self.read_pos = (self.read_pos +% 1);
+
+        arch.irq.irq.enable();
+        return ch;
+    }
+
+    pub fn getCharNonBlocking(self: *KeyboardBuffer) ?u8 {
+        arch.irq.irq.disable();
+        defer arch.irq.irq.enable();
+
+        if (self.read_pos == self.write_pos) {
+            return null;
+        }
+
+        const ch = self.buffer[self.read_pos];
+        self.read_pos = (self.read_pos +% 1);
+        return ch;
+    }
+
+    // Interrupt handler to put characters in buffer
+    fn keyboardInterruptHandler(frame: *arch.irq.InterruptFrame) void {
+        _ = frame;
+        if (ps2_ctrl.onIrq1Interrupt()) |scancode| {
+            if (kbd_mgr.keyboard1) |*kbd| {
+                if (kbd.processScancode(scancode)) |evt| {
+                    if (evt.pressed and evt.char != null) {
+                        keyboard_buffer.putChar(evt.char.?);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn getc() u8 {
+        return keyboard_buffer.getChar();
+    }
+
+    pub fn tryGetc() ?u8 {
+        return keyboard_buffer.getCharNonBlocking();
+    }
+
+    pub fn setup_irq(ctrl: *Ps2Controller, mgr: *KeyboardManager) !void {
+        arch.irq.irq.disable();
+        ps2_ctrl = ctrl;
+        kbd_mgr = mgr;
+        try arch.irq.irq.unregisterIrq(1); // Unregister any previous handler
+        try arch.irq.irq.registerIrq(1, keyboardInterruptHandler);
+        arch.irq.irq.enable();
+    }
+
+};
+
+var keyboard_buffer: KeyboardBuffer = .{};

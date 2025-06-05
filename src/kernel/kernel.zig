@@ -6,6 +6,8 @@ const arch = @import("arch");
 const config = @import("config");
 pub const thread = @import("thread.zig");
 pub const syscall = @import("syscall.zig");
+pub const mutex = @import("mutex.zig");
+pub const thread_queue = @import("thread_queue.zig");
 const scheduler = @import("scheduler.zig");
 const snakes = @import("snakes.zig");
 
@@ -88,6 +90,9 @@ pub fn main() !void {
         log.info("No keyboards detected. Exiting.\n", .{});
         return;
     }
+
+    state.keyboard_manager = &kbd_manager;
+    state.ps2_ctrl = &ps2_ctrl;
 
 
     if (state.options.polling_keyboard) {
@@ -234,6 +239,25 @@ pub fn main() !void {
 }
 
 
+pub fn keyboardIOThread(arg: *allowzero anyopaque) callconv(.C) i32 {
+    _ = arg;
+    log.info("Keyboard I/O thread started - type characters to see them echoed", .{});
+
+    while (true) {
+        const ch = drivers.keyboard.KeyboardBuffer.getc();
+        log.info("Keyboard thread got: '{c}' (0x{X:0>2})", .{ ch, ch });
+
+        // Echo the character to VGA
+        print("Echo: {c}\n", .{ch});
+
+        // Handle special keys
+        if (ch == '\r' or ch == '\n') {
+            print("--- Line End ---\n", .{});
+        }
+    }
+}
+
+
 fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32{
     const end: *u64 = @ptrCast(@alignCast(arg));
     var i: u32 = 0;
@@ -257,6 +281,29 @@ fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32{
 
 pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
     _ = arg;
+
+
+    // Create keyboard I/O test thread
+    drivers.keyboard.KeyboardBuffer.setup_irq(state.ps2_ctrl.?, state.keyboard_manager.?) catch {
+        @panic("Failed to setup keyboard IRQ");
+    };
+    const kbd_thread = thread.Thread.create(
+        &keyboardIOThread,
+        null,
+        true, // kernel thread
+        state.mem_manager.mapper.?,
+        state.getKernelAllocator().?,
+        false,
+        .NORMAL,
+    ) catch |err| {
+        log.err("Failed to create keyboard I/O thread: {}", .{err});
+        @panic("Failed to create keyboard I/O thread");
+    };
+
+    state.scheduler.?.addThread(kbd_thread) catch |err| {
+        log.err("Failed to add keyboard I/O thread to scheduler: {}", .{err});
+        @panic("Failed to add keyboard I/O thread to scheduler");
+    };
 
 
     if (state.testing.threading_snakes) {
@@ -283,12 +330,12 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         log.info("Scheduler changed to RunToCompletionScheduler", .{});
     }
 
-
     var i: u64 = 0;
     while(true){
-        log.info("idle loop {}",.{i});
+        log.debug("idle loop {}",.{i});
+        // check if we are the only thread
         thread.Thread.yield();
-        // arch.cpu.halt();
+        arch.cpu.halt();
         i+=1;
     }
 }
@@ -321,6 +368,8 @@ pub const Kernel = struct {
     stdio_port: drivers.serial_log.Port,
     stdio_baudrate: usize,
     stdio_init: bool,
+    keyboard_manager: ?*drivers.keyboard.KeyboardManager = null,
+    ps2_ctrl: ?*drivers.ps2.Ps2Controller = null,
     mem_manager: *mem.Manager,
     multiboot_info: multiboot.Multiboot2Info,
     kernel_heap: ?mem.allocator.FreeListAllocator = null,
@@ -493,6 +542,7 @@ pub const LogScope = enum {
     mem_allocator_verbose,
     mem_page_bitfield,
     mem_page_bitfield_verbose,
+    thread_yield,
     irq_page_fault,
     irq,
     std_log_default_scope,
@@ -513,6 +563,7 @@ pub const ALL_SCOPES = [_]LogScope{
     .mem_allocator,
     .mem_allocator_verbose,
     .irq,
+    .thread_yield,
     .irq_page_fault,
     .drivers_vga,
     .drivers_serial_log,

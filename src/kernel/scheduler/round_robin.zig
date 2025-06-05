@@ -1,6 +1,8 @@
 // src/kernel/schedulers/round_robin.zig
 const std = @import("std");
 const thread_s = @import("../thread.zig");
+const thread_queue = @import("../thread_queue.zig");
+const ThreadQueue = thread_queue.ThreadQueue;
 const scheduler = @import("../scheduler.zig");
 const Thread = thread_s.Thread;
 const Scheduler = scheduler.Scheduler;
@@ -10,6 +12,7 @@ const SchedulerVTable = scheduler.SchedulerVTable;
 
 pub const RoundRobinScheduler = struct {
     ready_queue: std.DoublyLinkedList(*Thread),
+    blocked_queues: std.AutoHashMap(u32, ThreadQueue),
     current_time_slice: u32,
     default_time_slice: u32,
     total_threads: u32,
@@ -27,6 +30,7 @@ pub const RoundRobinScheduler = struct {
             .total_threads = 0,
             .context_switches = 0,
             .allocator = allocator,
+            .blocked_queues = std.AutoHashMap(u32, ThreadQueue).init(allocator),
         };
         return self;
     }
@@ -158,4 +162,13 @@ pub const RoundRobinScheduler = struct {
 
         allocator.destroy(self);
     }
+
+    pub fn addBlockedQueue(self: *Self, queue_id: u32) !void {
+        try self.blocked_queues.put(queue_id, ThreadQueue.init());
+    }
+
+    pub fn getBlockedQueue(self: *Self, queue_id: u32) ?*ThreadQueue {
+        return self.blocked_queues.getPtr(queue_id);
+    }
+
 };

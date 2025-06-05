@@ -412,7 +412,7 @@ pub const exceptions = struct {
     }
 
     fn syscallHandler(frame: *InterruptFrame) void {
-        std.log.debug("syscall handler",.{});
+        // std.log.debug("syscall handler",.{});
         syscall.handleSyscall(frame);
     }
 
