@@ -32,9 +32,9 @@ pub const Color = enum(u4) {
 };
 
 /// Global state
-var buffer: [*]volatile u16 = undefined;
-var row: usize = 0;
-var column: usize = 0;
+pub var buffer: [*]volatile u16 = undefined;
+pub var row: usize = 0;
+pub var column: usize = 0;
 var fg_color: u4 = @intFromEnum(Color.LIGHT_GRAY);
 var bg_color: u4 = @intFromEnum(Color.BLACK);
 pub var initialized: bool = false;
@@ -71,7 +71,7 @@ pub fn setColor(foreground: Color, background: Color) void {
 }
 
 /// Create a VGA entry
-fn makeEntry(ch: u8, fg: u4, bg: u4) u16 {
+pub fn makeEntry(ch: u8, fg: u4, bg: u4) u16 {
     return @as(u16, ch) | (@as(u16, fg) << 8) | (@as(u16, bg) << 12);
 }
 

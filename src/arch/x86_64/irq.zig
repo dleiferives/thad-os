@@ -416,17 +416,17 @@ pub const exceptions = struct {
         syscall.handleSyscall(frame);
     }
 
-    fn cleanupHandler(frame: *InterruptFrame) void {
-        std.log.debug("cleanup handler",.{});
+    // fn cleanupHandler(frame: *InterruptFrame) void {
+    //     std.log.debug("cleanup handler",.{});
 
-        if (thread.cleanup_thread) |cleanup| {
-            if (thread.getCurrentThread()) |current| {
-                if (current != cleanup) {
-                    thread.switchContext(current, cleanup,frame);
-                }
-            }
-        }
-    }
+    //     if (thread.cleanup_thread) |cleanup| {
+    //         if (thread.getCurrentThread()) |current| {
+    //             if (current != cleanup) {
+    //                 thread.switchContext(current, cleanup,frame);
+    //             }
+    //         }
+    //     }
+    // }
 
 
 
@@ -455,7 +455,7 @@ pub const exceptions = struct {
 
     pub fn initThreading() void{
         dispatcher.register(.syscall, syscallHandler);
-        dispatcher.register(@enumFromInt(thread.THREAD_CLEANUP_VECTOR), cleanupHandler);
+        // dispatcher.register(@enumFromInt(thread.THREAD_CLEANUP_VECTOR), cleanupHandler);
     }
 
 };

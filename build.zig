@@ -201,6 +201,9 @@ pub fn build(b: *std.Build) void {
     const test_mapper = b.option(bool,"test_mapper","Enable test_mapper for early kernel boot") orelse false;
     const test_map_dispatch = b.option(bool,"test_map_dispatch","Enable test_map_dispatch for early kernel boot") orelse false;
     const test_allocator = b.option(bool,"test_allocator","Enable test_allocator for early kernel boot") orelse false;
+    const test_threading_increment = b.option(bool,"test_threading_increment","Enable test_threading_increment for early kernel boot") orelse false;
+    const test_threading_snakes = b.option(bool,"test_threading_snakes","Enable test_threading_snakes for early kernel boot") orelse false;
+    const test_threading_snakes_hungry = b.option(bool,"test_threading_snakes_hungry","Enable test_threading_snakes_hungry for early kernel boot") orelse false;
     // Add our options
     const options = b.addOptions();
     options.addOption(bool,"test_vga",test_vga);
@@ -208,7 +211,11 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool,"test_mapper",test_mapper);
     options.addOption(bool,"test_map_dispatch",test_map_dispatch);
     options.addOption(bool,"test_allocator",test_allocator);
+    options.addOption(bool,"test_threading_increment",test_threading_increment);
+    options.addOption(bool,"test_threading_snakes",test_threading_snakes);
+    options.addOption(bool,"test_threading_snakes_hungry",test_threading_snakes_hungry);
     kernel.addOptions("config", options);
+
 
 
     // Create an executable
@@ -219,7 +226,11 @@ pub fn build(b: *std.Build) void {
 
     // Set linker script
     exe.setLinkerScript(b.path("src/arch/x86_64/boot/linker.ld"));
-    exe.libc_file = null;
+    // exe.libc_file = null;
+
+    exe.addIncludePath(b.path("c-src"));
+    exe.addCSourceFile(.{ .file = b.path("c-src/snakes.c") });
+
 
 
     // TODO @(dleiferives,64b269c0-c96d-4583-b536-7930e0615c77): I want to not do

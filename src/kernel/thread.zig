@@ -85,6 +85,7 @@ pub const Thread = struct {
     // Context
     context: ThreadContext,
     is_kernel: bool,
+    is_start: bool,
 
     // Scheduling
     time_slice: u32,
@@ -98,10 +99,6 @@ pub const Thread = struct {
     // Entry point for user threads
     entry_point: ?*const fn (*anyopaque) callconv(.C) i32,
     entry_arg: ?*anyopaque,
-
-    // Linked list for scheduling
-    next: ?*Thread,
-    prev: ?*Thread,
 
     const ThreadError = error{
         ThreadingNotInitialized,
@@ -159,6 +156,7 @@ pub const Thread = struct {
             .mapper = mapper,
             .context = std.mem.zeroes(ThreadContext),
             .is_kernel = is_kernel,
+            .is_start = is_main,
             .time_slice = getTimeSlice(priority),
             .remaining_time = 0,
             .parent_tid = if (current_thread) |ct| ct.tid else null,
@@ -166,8 +164,6 @@ pub const Thread = struct {
             .owning_allocator = allocator,
             .entry_point = entry_fn,
             .entry_arg = arg,
-            .next = null,
-            .prev = null,
         };
 
         // Allocate kernel stack
@@ -211,7 +207,7 @@ pub const Thread = struct {
             :
             : [syscall] "{rax}" (@as(u64, 2)),
               [code] "{rdi}" (exit_code),
-            : "memory"
+            : "memory", "rdi", "rax"
         );
         unreachable;
     }
@@ -315,8 +311,11 @@ fn allocateUserStack(thread: *Thread) !void {
         },
     );
 
-    const ptr: [*]u8 = @ptrFromInt(stack_start);
-    thread.user_stack = ptr[0..stack_size];
+    // TODO @(dleiferives,ac1bd1ab-e711-429f-80e6-956a6830ad4c): this will break
+    // ~#
+    @panic("fix this user stack stuff");
+    // const ptr: [*]u8 = @ptrFromInt(stack_start);
+    // thread.user_stack = ptr[0..stack_size];
 }
 
 // Update setupInitialContext in thread.zig
@@ -338,6 +337,11 @@ fn setupInitialContext(thread: *Thread) !void {
             thread.context.rip = @intFromPtr(&kernelThreadWrapper);
             // Push entry point and args onto stack for wrapper
             thread.context.rdi = @intFromPtr(entry);
+            if(thread.entry_arg) |arg|{
+                thread.context.rsi = @intFromPtr(arg);
+            } else {
+                thread.context.rsi = 0;
+            }
             // std.log.info("accessintg stack {*}",.{stack_ptr});
             // stack_ptr[0] = @intFromPtr(entry);
             // std.log.info("wrote ",.{});
@@ -379,9 +383,10 @@ fn setupInitialContext(thread: *Thread) !void {
 pub fn kernelThreadWrapper() callconv(.C) noreturn {
     // Get entry point and args from stack
 
-    const entry_raw: u64= asm volatile ("mov %%rdi, %[rdi]" : [rdi] "=r" (-> u64));
-    const arg_raw: u64= asm volatile ("mov %%rsi, %[rsi]" : [rsi] "=r" (-> u64));
+    const entry_raw: u64= asm volatile ("mov %%rdi, %[rdi]" : [rdi] "={rax}" (-> u64));
+    const arg_raw: u64= asm volatile ("mov %%rsi, %[rsi]" : [rsi] "={rax}" (-> u64));
     std.log.info("entry raw i 0x{X:0>16}",.{entry_raw});
+    std.log.info("arg raw i 0x{X:0>16}",.{arg_raw});
 
     const entry_fn: *const fn (*allowzero anyopaque) callconv(.C) i32 = @ptrFromInt(entry_raw);
     const arg: *allowzero anyopaque = @ptrFromInt(arg_raw);
@@ -406,20 +411,6 @@ fn userThreadWrapper() callconv(.C) noreturn {
     Thread.exit(0);
 }
 
-pub fn removeFromReadyList(thread: *Thread) void {
-    if (thread.prev) |prev| {
-        prev.next = thread.next;
-    } else {
-        ready_list = thread.next;
-    }
-
-    if (thread.next) |next| {
-        next.prev = thread.prev;
-    }
-
-    thread.next = null;
-    thread.prev = null;
-}
 
 pub fn addToZombieList(thread: *Thread) void {
     thread.state = .ZOMBIE;

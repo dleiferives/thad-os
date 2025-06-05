@@ -7,6 +7,7 @@ const config = @import("config");
 pub const thread = @import("thread.zig");
 pub const syscall = @import("syscall.zig");
 const scheduler = @import("scheduler.zig");
+const snakes = @import("snakes.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -16,6 +17,14 @@ comptime {
 
     // early setting the container allocator to be linked to the kernel
     _ = mem.Manager;
+    _ = snakes.kfree;
+    _ = snakes.kmalloc;
+    _ = snakes.VGA_clear;
+    _ = snakes.VGA_row_count;
+    _ = snakes.VGA_col_count;
+    _ = snakes.kexit;
+    _ = snakes.VGA_display_attr_char;
+    _ = snakes.PROC_create_kthread;
 }
 
 pub var log_level: std.log.Level = std.log.Level.err;
@@ -41,6 +50,9 @@ pub fn main() !void {
         state.testing.mapper = config.test_mapper;
         state.testing.map_dispatch = config.test_map_dispatch;
         state.testing.allocator = config.test_allocator;
+        state.testing.threading_increment = config.test_threading_increment;
+        state.testing.threading_snakes = config.test_threading_snakes;
+        state.testing.threading_snakes_hungry = config.test_threading_snakes_hungry;
     }
 
     try state.mem_layout_init();
@@ -191,22 +203,25 @@ pub fn main() !void {
     };
 
 
-    const test_thread = thread.Thread.create(
-        &testKernelThread,
-        @ptrFromInt(10),
-        true, // Kernel thread
-        state.mem_manager.mapper.?, // Use the kernel's address space
-        state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
-        false,
-        .KERNEL,
-    ) catch |err| {
-        log.err("Failed to create kernel thread: {}", .{err});
-        return err;
-    };
-    // state.scheduler.?.current_thread = main_thread;
-
     try state.scheduler.?.addThread(main_thread);
-    try state.scheduler.?.addThread(test_thread);
+
+    if (state.testing.threading_increment){
+        var counter: u64 = 1;
+        const test_thread = thread.Thread.create(
+            &testKernelThread,
+            &counter,
+            true, // Kernel thread
+            state.mem_manager.mapper.?, // Use the kernel's address space
+            state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
+            false,
+            .KERNEL,
+        ) catch |err| {
+            log.err("Failed to create kernel thread: {}", .{err});
+            return err;
+        };
+        try state.scheduler.?.addThread(test_thread);
+    }
+    // state.scheduler.?.current_thread = main_thread;
 
     thread.Thread.yield();
 
@@ -218,9 +233,9 @@ pub fn main() !void {
 
 
 fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32{
-    _ = arg;
+    const end: *u64 = @ptrCast(@alignCast(arg));
     var i: u32 = 0;
-    while (i < 100) : (i += 1) {
+    while (i < end.*) : (i += 1) {
         log.info("Test kernel thread: iteration {}", .{i});
 
         // Do some work
@@ -234,17 +249,29 @@ fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32{
         }
     }
     log.info("Test kernel thread exiting", .{});
+
     return -1;
 }
 
 pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
     _ = arg;
 
+
+    if (state.testing.threading_snakes) {
+        state.options.vga_printing = false;
+        snakes.csnakes.setup_snakes(0);
+    }
+
+    if (state.testing.threading_snakes_hungry) {
+        state.options.vga_printing = false;
+        snakes.csnakes.setup_snakes(1);
+    }
+
     var i: u64 = 0;
     while(true){
         log.info("idle loop {}",.{i});
         thread.Thread.yield();
-        arch.cpu.halt();
+        // arch.cpu.halt();
         i+=1;
     }
 }
@@ -256,6 +283,9 @@ pub const Kernel = struct {
         mapper: bool = false,
         map_dispatch: bool = false,
         allocator: bool = false,
+        threading_increment: bool = false,
+        threading_snakes: bool = false,
+        threading_snakes_hungry: bool = false,
     },
     initilized: struct {
         mem_layout: bool = false,
@@ -266,6 +296,7 @@ pub const Kernel = struct {
     },
     options: struct {
         polling_keyboard: bool = false,
+        vga_printing: bool = true, // Enable VGA printing by default
     },
 
     vga_addr: usize,
@@ -406,7 +437,10 @@ pub fn print(comptime format: []const u8, args: anytype) void {
     // Print logging protect via disabling interrupts
     // arch.cpu.cli();
     if (drivers.vga.initialized) {
-        drivers.vga.print(format, args) catch {};
+        if(state.options.vga_printing) {
+            // Print to VGA
+            drivers.vga.print(format, args) catch {};
+        }
     }
     if (state.stdio_init) {
         if (drivers.serial_log.isInitialised(state.stdio_port)) {
