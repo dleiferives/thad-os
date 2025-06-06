@@ -2,14 +2,15 @@
 const std = @import("std");
 const arch = @import("arch");
 const ThreadQueue = @import("thread_queue.zig").ThreadQueue;
+const thread_s = @import("thread.zig");
+const kernel = @import("kernel.zig");
 
 pub const Mutex = struct {
     locked: bool = false,
     owner: ?*Thread = null,
     blocked_queue: ThreadQueue = .{},
 
-    const Thread = @import("thread.zig").Thread;
-    const kernel = @import("kernel.zig");
+    const Thread = thread_s.Thread;
 
     pub fn init() Mutex {
         return .{};
@@ -19,7 +20,7 @@ pub const Mutex = struct {
         arch.irq.irq.disable();
 
         while (self.locked) {
-            if (Thread.getCurrentThread()) |current| {
+            if (thread_s.getCurrentThread()) |current| {
                 current.state = .BLOCKED_MUTEX;
                 self.blocked_queue.enqueue(current);
 
@@ -38,7 +39,7 @@ pub const Mutex = struct {
         }
 
         self.locked = true;
-        self.owner = Thread.getCurrentThread();
+        self.owner = thread_s.getCurrentThread();
         arch.irq.irq.enable();
     }
 
@@ -46,7 +47,7 @@ pub const Mutex = struct {
         arch.irq.irq.disable();
         defer arch.irq.irq.enable();
 
-        if (self.owner != Thread.getCurrentThread()) {
+        if (self.owner != thread_s.getCurrentThread()) {
             @panic("Mutex unlock by non-owner");
         }
 
@@ -66,7 +67,7 @@ pub const Mutex = struct {
         }
 
         self.locked = true;
-        self.owner = Thread.getCurrentThread();
+        self.owner = thread_s.getCurrentThread();
         return true;
     }
 };

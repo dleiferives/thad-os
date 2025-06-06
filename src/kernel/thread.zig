@@ -3,6 +3,7 @@ const std = @import("std");
 const mem = @import("mem.zig");
 const arch = @import("arch");
 const Self = @This();
+const log = std.log.scoped(.kernel_thread);
 
 pub const NUM_THREADS = 512;
 pub const THREAD_CLEANUP_VECTOR = 129; // Dedicated interrupt for thread cleanup
@@ -130,10 +131,10 @@ pub const Thread = struct {
         ready_list = null;
         zombie_list = null;
 
-        std.log.info("trying to create a cleanup Thread",.{});
+        log.info("trying to create a cleanup Thread",.{});
         // Create cleanup thread
         try createCleanupThread(allocator);
-        std.log.info("Created a cleanup Thread",.{});
+        log.info("Created a cleanup Thread",.{});
 
         initialized = true;
     }
@@ -153,7 +154,7 @@ pub const Thread = struct {
         // Find free slot
         const slot = if (is_main) 0 else findFreeSlot() orelse return ThreadError.ThreadTableFull;
 
-        std.log.info("creating a thread",.{});
+        log.info("creating a thread",.{});
         thread.* = Thread{
             .tid = if (is_main) 0 else getNextTid(),
             .state = .READY,
@@ -178,22 +179,22 @@ pub const Thread = struct {
         // note that we will be moving off the boot stack for the main thread
         // at this point!
 
-        std.log.info("allocated kernel stack",.{});
+        log.info("allocated kernel stack",.{});
 
         // Allocate user stack if needed
         if (!is_kernel) {
-            std.log.info("allocating user stack",.{});
+            log.info("allocating user stack",.{});
             try allocateUserStack(thread);
         }
 
         // Set up initial context
-        std.log.info("setting up context",.{});
+        log.info("setting up context",.{});
         if(!is_main){
             try setupInitialContext(thread);
         } else {
             try setupInitialContext(thread);
         }
-        std.log.info("setup context",.{});
+        log.info("setup context",.{});
 
         // Add to thread table
         thread_table[slot] = thread;
@@ -304,7 +305,7 @@ fn allocateKernelStack(thread: *Thread, slot: usize) !void {
         (getKernelStackSize() * slot);
     const stack_size = getKernelStackSize();
 
-    std.log.info("Creating kernel stack",.{});
+    log.info("Creating kernel stack",.{});
     // Allocate virtual memory for kernel stack
     thread.mapper.mapRange(stack_start, stack_start + stack_size, mem.PageFlags{
         .present = true,
@@ -349,7 +350,7 @@ fn allocateUserStack(thread: *Thread) !void {
 fn setupInitialContext(thread: *Thread) !void {
     // Set up stack pointers
     if (thread.is_kernel) {
-        std.log.info("context is kernel",.{});
+        log.info("context is kernel",.{});
         // Kernel thread setup
         const stack_top = @intFromPtr(thread.kernel_stack.ptr) + thread.kernel_stack.len;
         thread.context.rsp = stack_top - 16; // Leave some space
@@ -360,7 +361,7 @@ fn setupInitialContext(thread: *Thread) !void {
         // If this has an entry point, set up a wrapper
         if (thread.entry_point) |entry| {
 
-            std.log.info("setup entrypoint ",.{});
+            log.info("setup entrypoint ",.{});
             thread.context.rip = @intFromPtr(&kernelThreadWrapper);
             // Push entry point and args onto stack for wrapper
             thread.context.rdi = @intFromPtr(entry);
@@ -369,18 +370,18 @@ fn setupInitialContext(thread: *Thread) !void {
             } else {
                 thread.context.rsi = 0;
             }
-            // std.log.info("accessintg stack {*}",.{stack_ptr});
+            // log.info("accessintg stack {*}",.{stack_ptr});
             // stack_ptr[0] = @intFromPtr(entry);
-            // std.log.info("wrote ",.{});
+            // log.info("wrote ",.{});
             // stack_ptr[1] = @intFromPtr(thread.entry_arg orelse @as(*allowzero anyopaque, @ptrFromInt(0)));
-            // std.log.info("done stack",.{});
-            // std.log.info("stack entry 0 {*} 1 {*}",.{&stack_ptr[0],&stack_ptr[1]});
+            // log.info("done stack",.{});
+            // log.info("stack entry 0 {*} 1 {*}",.{&stack_ptr[0],&stack_ptr[1]});
             // thread.context.rsp -= 16; // Adjust for pushed values
         }
 
-        std.log.info("end kernel specific ",.{});
+        log.info("end kernel specific ",.{});
     } else {
-        std.log.info("context is user",.{});
+        log.info("context is user",.{});
         // User thread setup
         if (thread.user_stack) |stack| {
             const stack_top = @intFromPtr(stack.ptr) + stack.len;
@@ -401,7 +402,7 @@ fn setupInitialContext(thread: *Thread) !void {
         }
     }
 
-    std.log.info("rflags setting fpu",.{});
+    log.info("rflags setting fpu",.{});
     // Enable interrupts
     thread.context.rflags = 0x202; // IF flag set
 }
@@ -412,8 +413,8 @@ pub fn kernelThreadWrapper() callconv(.C) noreturn {
 
     const entry_raw: u64= asm volatile ("mov %%rdi, %[rdi]" : [rdi] "={rax}" (-> u64));
     const arg_raw: u64= asm volatile ("mov %%rsi, %[rsi]" : [rsi] "={rax}" (-> u64));
-    std.log.info("entry raw i 0x{X:0>16}",.{entry_raw});
-    std.log.info("arg raw i 0x{X:0>16}",.{arg_raw});
+    log.info("entry raw i 0x{X:0>16}",.{entry_raw});
+    log.info("arg raw i 0x{X:0>16}",.{arg_raw});
 
     const entry_fn: *const fn (*allowzero anyopaque) callconv(.C) i32 = @ptrFromInt(entry_raw);
     const arg: *allowzero anyopaque = @ptrFromInt(arg_raw);
@@ -446,7 +447,7 @@ pub fn addToZombieList(thread: *Thread) void {
 }
 
 pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFrame) void {
-    std.log.debug("Context switch: {any} -> {any}", .{
+    log.debug("Context switch: {any} -> {any}", .{
         if (from) |f| f.tid else @as(u64, 0),
         to.tid
     });
@@ -471,7 +472,7 @@ pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFram
     // arch.cpu.gdt.setKernelStack(@intFromPtr(to.kernel_stack.ptr) + to.kernel_stack.len);
 
     // Load new context and jump to thread
-    std.log.debug("switching context!",.{});
+    log.debug("switching context!",.{});
     loadContext(&to.context);
 }
 

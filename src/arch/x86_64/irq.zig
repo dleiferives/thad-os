@@ -255,6 +255,9 @@ const pic = struct {
             port = CONTROLLER_DATA;
         } else {
             port = FOLLOWER_DATA;
+            // For slave PIC IRQs (8-15), also unmask cascade line (IRQ 2) on master
+            const master_current = cpu.inb(CONTROLLER_DATA);
+            cpu.outb(CONTROLLER_DATA, master_current & ~(@as(u8, 1) << 2));
         }
         const bit = if (irq_num < 8) irq_num else irq_num - 8;
         const current = cpu.inb(port);
@@ -504,7 +507,14 @@ pub const irq = struct {
         if (vector_n == null) return error.InvalidIrq;
         const vector = vector_n.?;
         dispatcher.register(vector, handler);
+
+        std.log.info("Unmasking IRQ {} for ATA", .{irq_num});
         try current_controller.unmask(irq_num);
+
+        // Debug: Read back the mask to verify
+        const mask_port: u8 = if (irq_num < 8) 0x21 else 0xA1;
+        const current_mask = cpu.inb(mask_port);
+        std.log.info("IRQ {} mask register 0x{X}: 0x{X:0>2}", .{irq_num, mask_port, current_mask});
     }
 
     pub fn unregisterIrq(irq_num: u8) !void {

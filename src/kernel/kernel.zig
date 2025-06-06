@@ -10,6 +10,7 @@ pub const mutex = @import("mutex.zig");
 pub const thread_queue = @import("thread_queue.zig");
 const scheduler = @import("scheduler.zig");
 const snakes = @import("snakes.zig");
+const mbr = @import("mbr.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -193,8 +194,6 @@ pub fn main() !void {
     thread.saveContext(ctx);
     log.info("starting to log context",.{});
     ctx.log();
-    // ctx.rip = @intFromPtr(&testKernelThread);
-    // thread.loadContext(ctx);
 
     const main_thread = thread.Thread.create(
         &kernelThreadMain,
@@ -208,7 +207,6 @@ pub fn main() !void {
         log.err("Failed to create kernel thread: {}", .{err});
         return err;
     };
-
 
     try state.scheduler.?.addThread(main_thread);
 
@@ -237,7 +235,6 @@ pub fn main() !void {
         arch.cpu.halt();
     }
 }
-
 
 pub fn keyboardIOThread(arg: *allowzero anyopaque) callconv(.C) i32 {
     _ = arg;
@@ -287,23 +284,23 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
     drivers.keyboard.KeyboardBuffer.setup_irq(state.ps2_ctrl.?, state.keyboard_manager.?) catch {
         @panic("Failed to setup keyboard IRQ");
     };
-    const kbd_thread = thread.Thread.create(
-        &keyboardIOThread,
-        null,
-        true, // kernel thread
-        state.mem_manager.mapper.?,
-        state.getKernelAllocator().?,
-        false,
-        .NORMAL,
-    ) catch |err| {
-        log.err("Failed to create keyboard I/O thread: {}", .{err});
-        @panic("Failed to create keyboard I/O thread");
-    };
+    // const kbd_thread = thread.Thread.create(
+    //     &keyboardIOThread,
+    //     null,
+    //     true, // kernel thread
+    //     state.mem_manager.mapper.?,
+    //     state.getKernelAllocator().?,
+    //     false,
+    //     .NORMAL,
+    // ) catch |err| {
+    //     log.err("Failed to create keyboard I/O thread: {}", .{err});
+    //     @panic("Failed to create keyboard I/O thread");
+    // };
 
-    state.scheduler.?.addThread(kbd_thread) catch |err| {
-        log.err("Failed to add keyboard I/O thread to scheduler: {}", .{err});
-        @panic("Failed to add keyboard I/O thread to scheduler");
-    };
+    // state.scheduler.?.addThread(kbd_thread) catch |err| {
+    //     log.err("Failed to add keyboard I/O thread to scheduler: {}", .{err});
+    //     @panic("Failed to add keyboard I/O thread to scheduler");
+    // };
 
 
     if (state.testing.threading_snakes) {
@@ -329,6 +326,26 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         state.scheduler = new_scheduler;
         log.info("Scheduler changed to RunToCompletionScheduler", .{});
     }
+
+
+    drivers.ata.init() catch |err| {
+        log.err("Failed to initialize ATA driver: {}", .{err});
+        @panic("Failed to initialize ATA driver");
+    };
+
+    // drivers.ata.testRead() catch |err| {
+    //     log.err("ATA read test failed: {}", .{err});
+    //     @panic("ATA read test failed");
+    // };
+
+    // drivers.ata.testWrite() catch |err| {
+    //     log.err("Failed to write to ATA device: {}", .{err});
+    //     @panic("Failed to write to ATA device");
+    // };
+    mbr.logAllMBR() catch |err| {
+            log.err("Failed to log MBR: {}", .{err});
+            @panic("Failed to log MBR");
+        };
 
     var i: u64 = 0;
     while(true){
@@ -527,9 +544,13 @@ pub const LogScope = enum {
     drivers_keyboard_verbose,
     drivers_uart_verbose,
     drivers_uart,
+    drivers_ata,
+    drivers_ata_verbose,
     arch_gdt,
     kernel,
     kernel_main,
+    kernel_mbr,
+    kernel_thread,
     mem,
     mem_verbose,
     mem_layout,
@@ -553,27 +574,31 @@ pub const ALL_SCOPES = [_]LogScope{
     .mem_page_bitfield_verbose,
     .mem_page_bitfield,
     .mem,
-    .mem_verbose,
+    // .mem_verbose,
     .mem_layout,
     .mem_manager,
     // .mem_manager_verbose,
     .mem_manager_mapper,
     // .mem_manager_mapper_verbose,
     // .mem_manager_mapper_translate,
-    .mem_allocator,
-    .mem_allocator_verbose,
+    // .mem_allocator,
+    // .mem_allocator_verbose,
     .irq,
-    .thread_yield,
+    // .thread_yield,
     .irq_page_fault,
     .drivers_vga,
     .drivers_serial_log,
     .drivers_ps2,
     .drivers_ps2_verbose,
     .drivers_keyboard,
+    // .drivers_ata,
+    // .drivers_ata_verbose,
     // .drivers_keyboard_verbose,
     .drivers_uart_verbose,
     .drivers_uart,
     .kernel,
+    .kernel_mbr,
+    // .kernel_thread,
     .arch_gdt,
     .kernel_main,
     .std_log_default_scope,
