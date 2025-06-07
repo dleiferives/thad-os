@@ -286,7 +286,7 @@ pub fn build(b: *std.Build) void {
 
     // Step 1: Create the empty disk image
     const create_img = b.addSystemCommand(&[_][]const u8{
-        "dd", "if=/dev/zero", std.fmt.comptimePrint("of={s}", .{image_path}), "bs=512", "count=32768"
+        "dd", "if=/dev/zero", std.fmt.comptimePrint("of={s}", .{image_path}), "bs=512", "count=65536"
     });
 
     // Step 2: Partition the image with parted
@@ -296,7 +296,7 @@ pub fn build(b: *std.Build) void {
     parted_label.step.dependOn(&create_img.step);
 
     const parted_part = b.addSystemCommand(&[_][]const u8{
-        "parted", image_path, "mkpart", "primary", "fat32", "2048s", "30720s"
+        "parted", image_path, "mkpart", "primary", "ext2", "2048s", "63480s"
     });
     parted_part.step.dependOn(&parted_label.step);
 
@@ -311,15 +311,35 @@ pub fn build(b: *std.Build) void {
     const install_grub = b.addSystemCommand(&[_][]const u8{
         "bash", "-c",
         \\set -eux
+        \\LOOP1=""
+        \\LOOP2=""
+        \\
+        \\# This function unmounts the partition and detaches the loopback devices.
+        \\# It is designed to be safe to run even if some steps failed.
+        \\cleanup() {
+        \\    echo "--- Running cleanup ---"
+        \\    # The '|| true' prevents the script from failing if umount/rmdir fails (e.g., not mounted).
+        \\    if [ -d /mnt/osfiles ]; then
+        \\        sudo umount /mnt/osfiles || true
+        \\    fi
+        \\    if [ -n "$LOOP2" ]; then
+        \\        sudo losetup -d "$LOOP2" || true
+        \\    fi
+        \\    if [ -n "$LOOP1" ]; then
+        \\        sudo losetup -d "$LOOP1" || true
+        \\    fi
+        \\    echo "--- Cleanup finished ---"
+        \\}
+        \\
+        \\# Register the cleanup function to run on any script exit.
+        \\trap cleanup EXIT
         \\LOOP1=$(sudo losetup -f --show os_image.img)
-        \\LOOP2=$(sudo losetup -f --show -o 1048576 os_image.img)
-        \\sudo mkdosfs -F32 -f 2 $LOOP2
+        \\LOOP2=$(sudo losetup -f --show -o 1048576 --sizelimit 31453184 os_image.img)
+        \\sudo mke2fs -t ext2 -L "boot" $LOOP2
+        // \\sudo mkdosfs -F32 -f 2 $LOOP2
         \\sudo mkdir -p /mnt/osfiles
         \\sudo mount $LOOP2 /mnt/osfiles
         \\sudo grub-install --root-directory=/mnt/osfiles --target=i386-pc --no-floppy --modules="normal part_msdos ext2 multiboot" $LOOP1
-        \\sudo umount /mnt/osfiles || true
-        \\sudo losetup -d $LOOP2 || true
-        \\sudo losetup -d $LOOP1 || true
         \\sudo chown $(id -u) os_image.img
         });
     install_grub.step.dependOn(&parted_boot.step);
@@ -328,16 +348,35 @@ pub fn build(b: *std.Build) void {
     const install_dev = b.addSystemCommand(&[_][]const u8{
         "bash", "-c",
         \\set -eux
+        \\LOOP1=""
+        \\LOOP2=""
+        \\
+        \\# This function unmounts the partition and detaches the loopback devices.
+        \\# It is designed to be safe to run even if some steps failed.
+        \\cleanup() {
+        \\    echo "--- Running cleanup ---"
+        \\    # The '|| true' prevents the script from failing if umount/rmdir fails (e.g., not mounted).
+        \\    if [ -d /mnt/osfiles ]; then
+        \\        sudo umount /mnt/osfiles || true
+        \\    fi
+        \\    if [ -n "$LOOP2" ]; then
+        \\        sudo losetup -d "$LOOP2" || true
+        \\    fi
+        \\    if [ -n "$LOOP1" ]; then
+        \\        sudo losetup -d "$LOOP1" || true
+        \\    fi
+        \\    echo "--- Cleanup finished ---"
+        \\}
+        \\
+        \\# Register the cleanup function to run on any script exit.
+        \\trap cleanup EXIT
         \\LOOP1=$(sudo losetup -f --show os_image.img)
-        \\LOOP2=$(sudo losetup -f --show -o 1048576 os_image.img)
+        \\LOOP2=$(sudo losetup -f --show -o 1048576 --sizelimit 31453184 os_image.img)
         \\sudo mkdir -p /mnt/osfiles
         \\sudo mount $LOOP2 /mnt/osfiles
         \\sudo mkdir -p /mnt/osfiles/boot/grub
         \\sudo cp zig-out/bin/kernel /mnt/osfiles/boot/
         \\echo 'menuentry "My Kernel" { multiboot2 /boot/kernel }' | sudo tee /mnt/osfiles/boot/grub/grub.cfg
-        \\sudo umount /mnt/osfiles || true
-        \\sudo losetup -d $LOOP2 || true
-        \\sudo losetup -d $LOOP1 || true
         \\sudo chown $(id -u) os_image.img
     });
     install_dev.step.dependOn(&install_grub.step);

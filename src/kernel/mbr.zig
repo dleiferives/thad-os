@@ -52,7 +52,7 @@ const chs = struct {
     }
 };
 
-const partition_table_entry = struct {
+pub const partition_table_entry = struct {
     boot_flag: u8,
     first_chs: chs,
     partition_type: u8,
@@ -88,6 +88,7 @@ const partition_table_entry = struct {
 
 pub const PartitionType = enum(u8) {
     FAT32_LBA = 0x0C,
+    LINIX = 0x83,
 
     pub fn validType(value: u8) bool {
         const fields = @typeInfo(@This()).@"enum".fields;
@@ -100,6 +101,7 @@ pub const PartitionType = enum(u8) {
     pub fn toString(self: @This()) []const u8 {
         return switch (self) {
             .FAT32_LBA => "FAT32 with LBA",
+            .LINIX => "Linux",
         };
     }
 
@@ -110,10 +112,40 @@ pub const PartitionType = enum(u8) {
     pub fn fromValue(value: u8) PartitionType {
         return switch (value) {
             0x0C => PartitionType.FAT32_LBA,
+            0x83 => PartitionType.LINIX,
             else => @panic("Invalid partition type value"),
         };
     }
 };
+
+pub const PartitionEntryIterator = struct {
+    dev: *drivers.block_device.BlockDev,
+    entries: [4]partition_table_entry,
+    index: usize = 0,
+
+    pub fn init(dev: *drivers.block_device.BlockDev) ?PartitionEntryIterator {
+        var mbr_bytes: [512]u8 = undefined;
+        dev.readBlock(0, &mbr_bytes) catch {return null;};
+        const mbr_data = mbr.fromBytes(mbr_bytes[0..]);
+        if (!mbr_data.validSignature()) {
+            return null;
+        }
+        return PartitionEntryIterator{
+            .dev = dev,
+            .entries = mbr_data.partition_table,
+            .index = 0,
+        };
+    }
+
+    pub fn next(self: *PartitionEntryIterator) ?partition_table_entry {
+        if (self.index > 3) return null;
+        const entry = self.entries[self.index];
+        self.index += 1;
+        if (entry.boot_flag == 0) return null; // Skip empty entries
+        return entry;
+    }
+};
+
 
 pub fn logAllMBR() !void {
     var block_dev_iter = drivers.block_device.getBlockDeviceIterator();

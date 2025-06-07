@@ -11,6 +11,7 @@ pub const thread_queue = @import("thread_queue.zig");
 const scheduler = @import("scheduler.zig");
 const snakes = @import("snakes.zig");
 const mbr = @import("mbr.zig");
+const ext2 = @import("ext2.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -346,6 +347,23 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
             log.err("Failed to log MBR: {}", .{err});
             @panic("Failed to log MBR");
         };
+
+
+
+    log.info("starting to create filesystems",.{});
+
+    var ext2_iter = ext2.Ext2FilesystemIterator.init(state.getKernelAllocator() orelse @panic("could not get allocator when trying to test ext2 filesystem")) catch |err| {
+        log.err("Failed to initialize ext2 filesystem iterator: {}", .{err});
+        @panic("Failed to initialize ext2 filesystem iterator");
+    };
+
+    while (ext2_iter.next()) |fs| {
+        log.info("found ext2 filesystem: {s}", .{fs.superblock.volume_name});
+        log.info("There are {} blocks in this filesystem", .{fs.superblock.blocks_count});
+        log.info("There are {} block groups in this filesystem", .{fs.block_groups.len});
+        fs.deinit(); // Deinitialize the filesystem
+    }
+
 
     var i: u64 = 0;
     while(true){
