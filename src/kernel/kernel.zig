@@ -15,7 +15,6 @@ const ext2 = @import("ext2.zig");
 const vfs = @import("vfs.zig");
 const simple_fs = @import("simple_fs.zig");
 const elf = @import("elf.zig");
-const elf_loader = @import("elf_loader.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -338,6 +337,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         @panic("Failed to initialize ATA driver");
     };
 
+    // Load and run the second program as a kernel thread
 
     // drivers.ata.testRead() catch |err| {
     //     log.err("ATA read test failed: {}", .{err});
@@ -387,12 +387,6 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
             testVfsOperations() catch |err| {
                 log.err("VFS tests failed: {}", .{err});
             };
-
-
-            // Load and run the second program as a kernel thread
-            elf_loader.loadAndExecute("/bin/program") catch |err| {
-                log.err("Failed to load executable: {}", .{err});
-            };
         }
 
         // fs.printFullTree() catch |err| {
@@ -403,6 +397,18 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         fs.deinit(); // Deinitialize the filesystem
     }
 
+    // If no ext2 found, create simple root
+    if (!mounted_ext2) {
+        log.info("No ext2 filesystem found, creating simple root", .{});
+        simple_fs.createSimpleRoot(state.getKernelAllocator() orelse @panic("no allocator")) catch |err| {
+            log.err("Failed to create simple root: {}", .{err});
+            @panic("Failed to create simple root");
+        };
+
+        testVfsOperations() catch |err| {
+            log.err("VFS tests failed: {}", .{err});
+        };
+    }
 
     var i: u64 = 0;
     while(true){
@@ -626,12 +632,10 @@ pub const LogScope = enum {
     std_log_default_scope,
     simple_fs,
     kernel_vfs,
-    elf_loader,
 };
 
 pub var allowed_scopes: ?[]const LogScope = null;
 pub const ALL_SCOPES = [_]LogScope{
-    .elf_loader,
     .simple_fs,
     .kernel_vfs,
     .mem_page_bitfield_verbose,
@@ -861,7 +865,6 @@ fn testVfsOperations() !void {
     // --- NEW TEST CODE ---
     log.info("--- Testing file read: /boot/grub/grub.cfg ---", .{});
     const grub_cfg_path = "/boot/grub/grub.cfg";
-    // const grub_cfg_path = "/bin/program";
     const file_fd = vfs.vfs_open(
         grub_cfg_path,
         vfs.FileDescriptor.O_RDONLY,
@@ -931,6 +934,7 @@ fn testVfsOperations() !void {
 
     log.info("=== VFS Tests Complete ===", .{});
 }
+
 
 pub fn kputc(ch: u8) void {
     // arch.cpu.cli(); // Ensure atomic character output

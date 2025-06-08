@@ -1,7 +1,6 @@
 pub const std = @import("std");
 pub const types = @import("mem/types.zig");
 pub const allocator = @import("mem/allocator.zig");
-pub const memory_space = @import("mem/memory_space.zig");
 const multiboot = @import("multiboot.zig");
 const PageBitField = @import("mem/page_bitfield.zig").PageBitField;
 const elf = @import("elf.zig");

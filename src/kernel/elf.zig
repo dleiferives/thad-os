@@ -654,19 +654,3 @@ pub fn parseElfSections(tag: *const ElfSymbolsTag, is_64bit: bool) void {
         }
     }
 }
-
-pub fn littleToNativeInPlace(bytes: []u8) void {
-    std.debug.assert(bytes.len % 4 == 0);
-
-    // Ensure alignment for u32
-    const aligned_ptr = bytes.ptr;
-
-    // Cast to many-item pointer to u32 (type inferred)
-    const u32_ptr: [*]u32 = @alignCast(@ptrCast(aligned_ptr));
-
-    const u32_slice = u32_ptr[0 .. bytes.len / 4];
-
-    for (u32_slice) |*val| {
-        val.* = std.mem.littleToNative(u32, val.*);
-    }
-}
