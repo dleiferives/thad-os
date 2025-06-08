@@ -34,7 +34,31 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSafe,
     });
 
+    // =========================================================================
+    // Echo Program (the one we will load)
+    // =========================================================================
+    const echo_program = b.addExecutable(.{
+        .name = "echo_program",
+        .target = target,
+        .optimize = optimize,
+    });
 
+    // Add the C source file
+    echo_program.addCSourceFile(.{ .file = b.path("c-src/echo.c") });
+    echo_program.addIncludePath(b.path("c-src"));
+
+    // Use our custom linker script
+    echo_program.setLinkerScript(b.path("program.ld"));
+
+    // Critical options for a freestanding program
+    echo_program.setLibCFile(null); // No standard C library
+    // echo_program.strip = true;
+    echo_program.pie = false; // Not position-independent
+    echo_program.bundle_compiler_rt = false;
+    echo_program.bundle_ubsan_rt = false;
+    echo_program.no_builtin = true;
+
+    b.installArtifact(echo_program);
 
     // Boot
     const boot = b.addModule("boot", .{
@@ -375,7 +399,9 @@ pub fn build(b: *std.Build) void {
         \\sudo mkdir -p /mnt/osfiles
         \\sudo mount $LOOP2 /mnt/osfiles
         \\sudo mkdir -p /mnt/osfiles/boot/grub
+        \\sudo mkdir -p /mnt/osfiles/bin
         \\sudo cp zig-out/bin/kernel /mnt/osfiles/boot/
+        \\sudo cp zig-out/bin/echo_program /mnt/osfiles/bin/program
         \\echo 'menuentry "My Kernel" { multiboot2 /boot/kernel }' | sudo tee /mnt/osfiles/boot/grub/grub.cfg
         \\sudo chown $(id -u) os_image.img
     });

@@ -5,6 +5,7 @@ const arch = @import("arch");
 const Self = @This();
 const log = std.log.scoped(.kernel_thread);
 const vfs = @import("vfs.zig");
+const syscall = @import("syscall.zig");
 
 pub const NUM_THREADS = 512;
 pub const THREAD_CLEANUP_VECTOR = 129; // Dedicated interrupt for thread cleanup
@@ -243,6 +244,23 @@ pub const Thread = struct {
             : "memory"
         );
     }
+
+        pub fn putc(char: u8) void {
+            asm volatile ("int $128"
+                :
+                : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.PUTC))),
+                [arg1] "{rdi}" (char),
+                : "memory", "rax", "rdi"
+            );
+        }
+
+        pub fn getc() u8 {
+            return asm volatile ("int $128"
+                : [ret] "={rax}" (-> u8),
+                : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.GETC))),
+                : "memory", "rax"
+            );
+        }
 
     pub fn blockOn(queue: *@import("thread_queue.zig").ThreadQueue, enable_interrupts: bool) void {
         if (getCurrentThread()) |current| {

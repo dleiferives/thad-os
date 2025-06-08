@@ -100,6 +100,13 @@ pub const elf = struct {
         pub const MASKPROC = 0xF0000000;
     };
 
+    /// Program header flags
+    pub const PF = struct {
+        pub const X = 1; // Execute
+        pub const W = 2; // Write
+        pub const R = 4; // Read
+    };
+
     /// 32-bit ELF header
     pub const Elf32_Ehdr = extern struct {
         e_ident: [EI.NIDENT]u8,
@@ -186,9 +193,22 @@ pub const elf = struct {
         p_filesz: u64,
         p_memsz: u64,
         p_align: u64,
+
+        pub fn isLoadable(self: *const @This()) bool {
+            return self.p_type == elf.PT.LOAD;
+        }
+        pub fn isReadable(self: *const @This()) bool {
+            return (self.p_flags & elf.PF.R) != 0;
+        }
+        pub fn isWritable(self: *const @This()) bool {
+            return (self.p_flags & elf.PF.W) != 0;
+        }
+        pub fn isExecutable(self: *const @This()) bool {
+            return (self.p_flags & elf.PF.X) != 0;
+        }
     };
 
-/// Symbol Binding Attributes (for st_info)
+    /// Symbol Binding Attributes (for st_info)
     pub const STB = struct {
         pub const LOCAL = 0;
         pub const GLOBAL = 1;
@@ -259,10 +279,100 @@ pub const elf = struct {
     pub fn ELF_ST_VISIBILITY(other: u8) u8 {
         return other & 0x3;
     }
-
 };
 
+/// An ELF file parser, focused on loading executables.
+pub const ElfFile = struct {
+    bytes: []const u8,
+    header: *const elf.Elf64_Ehdr,
 
+    pub const ElfParseError = error{
+        InvalidMagic,
+        Not64Bit,
+        NotLittleEndian,
+        UnsupportedType,
+        InvalidHeader,
+    };
+
+    /// Parses a byte slice into a validated ELF file structure.
+    pub fn parse(file_bytes: []const u8) ElfParseError!ElfFile {
+        if (file_bytes.len < @sizeOf(elf.Elf64_Ehdr)) {
+            return ElfParseError.InvalidHeader;
+        }
+
+        const header: *const elf.Elf64_Ehdr = @ptrCast(@alignCast(file_bytes.ptr));
+
+        // Validate the ELF header
+        if (header.e_ident[elf.EI.MAG0] != 0x7F or
+            header.e_ident[elf.EI.MAG1] != 'E' or
+            header.e_ident[elf.EI.MAG2] != 'L' or
+            header.e_ident[elf.EI.MAG3] != 'F')
+        {
+            return ElfParseError.InvalidMagic;
+        }
+        if (header.e_ident[elf.EI.CLASS] != elf.ELFCLASS.BITS64) {
+            return ElfParseError.Not64Bit;
+        }
+        if (header.e_ident[elf.EI.DATA] != elf.ELFDATA.LSB) {
+            return ElfParseError.NotLittleEndian;
+        }
+        if (header.e_type != elf.ET.EXEC) {
+            return ElfParseError.UnsupportedType;
+        }
+        if (header.e_phoff == 0 or header.e_phnum == 0) {
+            return ElfParseError.InvalidHeader;
+        }
+
+        return ElfFile{
+            .bytes = file_bytes,
+            .header = header,
+        };
+    }
+
+    /// Returns the executable's entry point address.
+    pub fn getEntryPoint(self: ElfFile) u64 {
+        return self.header.e_entry;
+    }
+
+    /// Returns an iterator over the program headers.
+    pub fn getProgramHeaders(self: ElfFile) ProgramHeaderIterator {
+        return ProgramHeaderIterator.init(self.bytes, self.header);
+    }
+};
+
+/// An iterator for the program headers of an ELF file.
+pub const ProgramHeaderIterator = struct {
+    file_bytes: []const u8,
+    header: *const elf.Elf64_Ehdr,
+    current_index: u16 = 0,
+
+    pub fn init(
+        file_bytes: []const u8,
+        header: *const elf.Elf64_Ehdr,
+    ) ProgramHeaderIterator {
+        return .{
+            .file_bytes = file_bytes,
+            .header = header,
+        };
+    }
+
+    pub fn next(self: *ProgramHeaderIterator) ?*const elf.Elf64_Phdr {
+        if (self.current_index >= self.header.e_phnum) {
+            return null;
+        }
+
+        const offset = self.header.e_phoff +
+            (@as(u64, self.current_index) * self.header.e_phentsize);
+
+        if (offset + self.header.e_phentsize > self.file_bytes.len) {
+            return null; // Out of bounds
+        }
+
+        const phdr: *const elf.Elf64_Phdr = @ptrCast(@alignCast(self.file_bytes.ptr + offset));
+        self.current_index += 1;
+        return phdr;
+    }
+};
 
 /// ELF section header iterator
 pub const ElfSectionIterator = struct {
@@ -280,7 +390,10 @@ pub const ElfSectionIterator = struct {
     }
 
     /// Set the string table data for section name resolution
-    pub fn setStringTable(self: *ElfSectionIterator, string_table: []const u8) void {
+    pub fn setStringTable(
+        self: *ElfSectionIterator,
+        string_table: []const u8,
+    ) void {
         self.string_table_data = string_table;
     }
 
@@ -290,9 +403,11 @@ pub const ElfSectionIterator = struct {
             return null;
         }
 
-        const section_offset = @sizeOf(ElfSymbolsTag) + (self.current_index * self.tag.entsize);
+        const section_offset = @sizeOf(ElfSymbolsTag) +
+            (self.current_index * self.tag.entsize);
         if (self.tag.entsize != @sizeOf(elf.Elf64_Shdr) and
-            self.tag.entsize != @sizeOf(elf.Elf32_Shdr)) {
+            self.tag.entsize != @sizeOf(elf.Elf32_Shdr))
+        {
             std.log.debug("Invalid section header size: {}", .{self.tag.entsize});
             return null;
         }
@@ -306,35 +421,19 @@ pub const ElfSectionIterator = struct {
             .string_table = self.string_table_data,
         };
 
-
-
-        const buffer:[*]u8 = @ptrFromInt(@intFromPtr(self.tag) + @sizeOf(ElfSymbolsTag) - @sizeOf(u32));
+        const buffer: [*]u8 = @ptrFromInt(@intFromPtr(self.tag) +
+            @sizeOf(ElfSymbolsTag) -
+            @sizeOf(u32));
         const offset_in_buffer = self.current_index * self.tag.entsize;
         const single_header_size = @sizeOf(elf.Elf64_Shdr);
-        const section_header_bytes_from_buffer = buffer[offset_in_buffer .. offset_in_buffer + single_header_size];
-        // for (section_header_bytes_from_buffer) |byte| {
-        //     std.log.warn("{X:0>2}", .{byte});
-
-        // }
-        // std.log.warn("eeek\n",.{});
-        // const u32_slice = std.mem.bytesAsSlice(u32, section_header_bytes_from_buffer);
-        // for (u32_slice) |s| {
-        //     const little = std.mem.littleToNative(u32,s);
-        //     std.log.warn("{X:0>8} {X:0>8}\n",.{little, s});
-        // }
+        const section_header_bytes_from_buffer = buffer[offset_in_buffer .. offset_in_buffer +
+            single_header_size];
 
         if (self.is_64bit) {
-            section.header64 = std.mem.bytesAsValue(elf.Elf64_Shdr, section_header_bytes_from_buffer).*;
-            // std.log.debug("Section Name 64-bit: 0x{X:0>8}", .{section.header64.sh_name});
-            // std.log.debug("Section Type 64-bit: 0x{X:0>8}", .{section.header64.sh_type});
-            // std.log.debug("Section Flags 64-bit: 0x{X:0>16}", .{section.header64.sh_flags});
-            // std.log.debug("Section Address 64-bit: 0x{X:0>16}", .{section.header64.sh_addr});
-            // std.log.debug("Section Offset 64-bit: 0x{X:0>16}", .{section.header64.sh_offset});
-            // std.log.debug("Section Size 64-bit: 0x{X:0>16}", .{section.header64.sh_size});
-            // std.log.debug("Section Link 64-bit: 0x{X:0>8}", .{section.header64.sh_link});
-            // std.log.debug("Section Info 64-bit: 0x{X:0>8}", .{section.header64.sh_info});
-            // std.log.debug("Section Addralign 64-bit: 0x{X:0>16}", .{section.header64.sh_addralign});
-            // std.log.debug("Section Entsize 64-bit: 0x{X:0>16}", .{section.header64.sh_entsize});
+            section.header64 = std.mem.bytesAsValue(
+                elf.Elf64_Shdr,
+                section_header_bytes_from_buffer,
+            ).*;
             if (self.string_table_data != null) {
                 section.name = section.getName();
             }
@@ -358,7 +457,10 @@ pub const ElfSectionIterator = struct {
         var section: ?ElfSection = null;
         while (self.next()) |sect| {
             if (self.current_index - 1 == self.tag.shndx) {
-                std.log.debug("Found string table section at index {}\n", .{self.current_index - 1});
+                std.log.debug(
+                    "Found string table section at index {}\n",
+                    .{self.current_index - 1},
+                );
                 section = sect;
                 break;
             }
@@ -381,7 +483,10 @@ pub const ElfSection = struct {
     /// Get section name if string table is available
     pub fn getName(self: ElfSection) ?[]const u8 {
         const string_table = self.string_table orelse return null;
-        const name_offset = if (self.is_64bit) self.header64.sh_name else self.header32.sh_name;
+        const name_offset = if (self.is_64bit)
+            self.header64.sh_name
+        else
+            self.header32.sh_name;
 
         if (name_offset >= string_table.len) return null;
 
@@ -394,7 +499,10 @@ pub const ElfSection = struct {
 
     /// Get section type as a string
     pub fn getTypeString(self: ElfSection) []const u8 {
-        const sh_type = if (self.is_64bit) self.header64.sh_type else self.header32.sh_type;
+        const sh_type = if (self.is_64bit)
+            self.header64.sh_type
+        else
+            self.header32.sh_type;
 
         return switch (sh_type) {
             elf.SHT.NULL => "NULL",
@@ -414,14 +522,23 @@ pub const ElfSection = struct {
 
     /// Get section data pointer
     pub fn getDataPtr(self: ElfSection) [*]const u8 {
-        const offset = if (self.is_64bit) self.header64.sh_offset else self.header32.sh_offset;
+        const offset = if (self.is_64bit)
+            self.header64.sh_offset
+        else
+            self.header32.sh_offset;
         return @ptrFromInt(offset);
     }
 
     /// Get section data slice if available
     pub fn getData(self: ElfSection) ?[]const u8 {
-        const offset = if (self.is_64bit) self.header64.sh_offset else self.header32.sh_offset;
-        const size = if (self.is_64bit) self.header64.sh_size else self.header32.sh_size;
+        const offset = if (self.is_64bit)
+            self.header64.sh_offset
+        else
+            self.header32.sh_offset;
+        const size = if (self.is_64bit)
+            self.header64.sh_size
+        else
+            self.header32.sh_size;
 
         if (offset == 0 or size == 0) return null;
 
@@ -430,7 +547,10 @@ pub const ElfSection = struct {
 
     /// Get section flags as a string
     pub fn getFlagsString(self: ElfSection, buffer: []u8) []const u8 {
-        const flags = if (self.is_64bit) self.header64.sh_flags else self.header32.sh_flags;
+        const flags = if (self.is_64bit)
+            self.header64.sh_flags
+        else
+            self.header32.sh_flags;
         var pos: usize = 0;
 
         if (flags & elf.SHF.WRITE != 0) buffer[pos] = 'W';
@@ -447,22 +567,27 @@ pub const ElfSection = struct {
         return buffer[0..pos];
     }
 
-    pub fn toMemoryMap(self: ElfSection,kernel_offset:u64) ?types.MemoryMap {
-        const addr = if (self.is_64bit) self.header64.sh_addr else self.header32.sh_addr;
-        const size = if (self.is_64bit) self.header64.sh_size else self.header32.sh_size;
+    pub fn toMemoryMap(self: ElfSection, kernel_offset: u64) ?types.MemoryMap {
+        const addr = if (self.is_64bit)
+            self.header64.sh_addr
+        else
+            self.header32.sh_addr;
+        const size = if (self.is_64bit)
+            self.header64.sh_size
+        else
+            self.header32.sh_size;
 
-        if(addr < kernel_offset + size) return null;
+        if (addr < kernel_offset + size) return null;
         return types.MemoryMap{
             .virtual = types.MemoryRange{
                 .start = addr,
                 .end = addr + size,
             },
-            .physical =  types.MemoryRange{
+            .physical = types.MemoryRange{
                 .start = addr - kernel_offset,
                 .end = addr - kernel_offset + size,
             },
         };
-
     }
 };
 
@@ -484,7 +609,10 @@ pub fn parseElfSections(tag: *const ElfSymbolsTag, is_64bit: bool) void {
     section_iterator.current_index = 0;
 
     std.log.debug("Section Headers (total: {}):\n", .{tag.num});
-    std.log.debug("  [Nr] Name                Type           Address          Offset    Size     Flags\n", .{});
+    std.log.debug(
+        "  [Nr] Name                Type           Address          Offset    Size     Flags\n",
+        .{},
+    );
 
     // var flags_buffer: [8]u8 = [_]u8{' '} ** 8;
 
@@ -498,13 +626,31 @@ pub fn parseElfSections(tag: *const ElfSymbolsTag, is_64bit: bool) void {
         const flags_str = "aa";
 
         if (is_64bit) {
-            std.log.debug("  [{:2}] {s:<20} {s:<15} {X:0>16} {X:0>8} {X:0>8} {s}\n",
-                .{i, name, type_str, section.header64.sh_addr, section.header64.sh_offset,
-                 section.header64.sh_size, flags_str});
+            std.log.debug(
+                "  [{:2}] {s:<20} {s:<15} {X:0>16} {X:0>8} {X:0>8} {s}\n",
+                .{
+                    i,
+                    name,
+                    type_str,
+                    section.header64.sh_addr,
+                    section.header64.sh_offset,
+                    section.header64.sh_size,
+                    flags_str,
+                },
+            );
         } else {
-            std.log.debug("  [{:2}] {s:<20} {s:<15} {X:0>8} {X:0>8} {X:0>8} {s}\n",
-                .{i, name, type_str, section.header32.sh_addr, section.header32.sh_offset,
-                 section.header32.sh_size, flags_str});
+            std.log.debug(
+                "  [{:2}] {s:<20} {s:<15} {X:0>8} {X:0>8} {X:0>8} {s}\n",
+                .{
+                    i,
+                    name,
+                    type_str,
+                    section.header32.sh_addr,
+                    section.header32.sh_offset,
+                    section.header32.sh_size,
+                    flags_str,
+                },
+            );
         }
     }
 }

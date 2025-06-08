@@ -13,6 +13,9 @@ const snakes = @import("snakes.zig");
 const mbr = @import("mbr.zig");
 const ext2 = @import("ext2.zig");
 const vfs = @import("vfs.zig");
+const simple_fs = @import("simple_fs.zig");
+const elf = @import("elf.zig");
+const elf_loader = @import("elf_loader.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -335,6 +338,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         @panic("Failed to initialize ATA driver");
     };
 
+
     // drivers.ata.testRead() catch |err| {
     //     log.err("ATA read test failed: {}", .{err});
     //     @panic("ATA read test failed");
@@ -352,22 +356,53 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
 
 
     log.info("starting to create filesystems",.{});
+// Initialize VFS
+    log.info("Initializing VFS", .{});
+    vfs.init(state.getKernelAllocator() orelse @panic("could not get allocator for VFS"));
+
+    log.info("starting to create filesystems",.{});
 
     var ext2_iter = ext2.Ext2FilesystemIterator.init(state.getKernelAllocator() orelse @panic("could not get allocator when trying to test ext2 filesystem")) catch |err| {
         log.err("Failed to initialize ext2 filesystem iterator: {}", .{err});
         @panic("Failed to initialize ext2 filesystem iterator");
     };
 
+    var mounted_ext2 = false;
     while (ext2_iter.next()) |fs| {
         log.info("found ext2 filesystem: {s}", .{fs.superblock.volume_name});
         log.info("There are {} blocks in this filesystem", .{fs.superblock.blocks_count});
         log.info("There are {} block groups in this filesystem", .{fs.block_groups.len});
-        fs.printFullTree() catch |err| {
-            log.err("Failed to print ext2 filesystem tree: {}", .{err});
-            @panic("Failed to print ext2 filesystem tree");
-        };
+
+        // Mount the first ext2 filesystem as root
+        if (!mounted_ext2) {
+            log.info("Mounting ext2 filesystem as VFS root", .{});
+            simple_fs.mountExt2Root(state.getKernelAllocator() orelse @panic("no allocator"), fs) catch |err| {
+                log.err("Failed to mount ext2 as root: {}", .{err});
+                continue;
+            };
+            mounted_ext2 = true;
+
+            // Test VFS operations
+            log.info("Testing VFS operations", .{});
+            testVfsOperations() catch |err| {
+                log.err("VFS tests failed: {}", .{err});
+            };
+
+
+            // Load and run the second program as a kernel thread
+            elf_loader.loadAndExecute("/bin/program") catch |err| {
+                log.err("Failed to load executable: {}", .{err});
+            };
+        }
+
+        // fs.printFullTree() catch |err| {
+        //     log.err("Failed to print ext2 filesystem tree: {}", .{err});
+        //     @panic("Failed to print ext2 filesystem tree");
+        // };
+
         fs.deinit(); // Deinitialize the filesystem
     }
+
 
     var i: u64 = 0;
     while(true){
@@ -589,10 +624,16 @@ pub const LogScope = enum {
     irq_page_fault,
     irq,
     std_log_default_scope,
+    simple_fs,
+    kernel_vfs,
+    elf_loader,
 };
 
 pub var allowed_scopes: ?[]const LogScope = null;
 pub const ALL_SCOPES = [_]LogScope{
+    .elf_loader,
+    .simple_fs,
+    .kernel_vfs,
     .mem_page_bitfield_verbose,
     .mem_page_bitfield,
     .mem,
@@ -769,7 +810,10 @@ fn testVfsOperations() !void {
     log.info("=== Testing VFS Operations ===", .{});
 
     // Test opening root directory
-    const root_fd = vfs.vfs_open("/", vfs.FileDescriptor.O_RDONLY | vfs.FileDescriptor.O_DIRECTORY) catch |err| {
+    const root_fd = vfs.vfs_open(
+        "/",
+        vfs.FileDescriptor.O_RDONLY | vfs.FileDescriptor.O_DIRECTORY,
+    ) catch |err| {
         log.err("Failed to open root directory: {}", .{err});
         return;
     };
@@ -785,7 +829,7 @@ fn testVfsOperations() !void {
     };
 
     log.info("Root stat: inode={}, mode=0o{o}, size={}", .{
-        root_stat.st_ino, root_stat.st_mode, root_stat.st_size
+        root_stat.st_ino, root_stat.st_mode, root_stat.st_size,
     });
 
     // Test readdir on root
@@ -794,9 +838,14 @@ fn testVfsOperations() !void {
     const ReaddirState = struct {
         count: u32 = 0,
 
-        fn callback(dirent: *const vfs.VfsDirent, user_data: ?*anyopaque) vfs.VfsError!void {
+        fn callback(
+            dirent: *const vfs.VfsDirent,
+            user_data: ?*anyopaque,
+        ) vfs.VfsError!void {
             const state_: *@This() = @ptrCast(@alignCast(user_data.?));
-            log.info("  {s} (inode={}, type={})", .{ dirent.d_name, dirent.d_ino, dirent.d_type });
+            log.info("  {s} (inode={}, type={})", .{
+                dirent.d_name, dirent.d_ino, dirent.d_type,
+            });
             state_.count += 1;
         }
     };
@@ -808,5 +857,89 @@ fn testVfsOperations() !void {
     };
 
     log.info("Found {} entries in root directory", .{readdir_state.count});
+
+    // --- NEW TEST CODE ---
+    log.info("--- Testing file read: /boot/grub/grub.cfg ---", .{});
+    const grub_cfg_path = "/boot/grub/grub.cfg";
+    // const grub_cfg_path = "/bin/program";
+    const file_fd = vfs.vfs_open(
+        grub_cfg_path,
+        vfs.FileDescriptor.O_RDONLY,
+    ) catch |err| {
+        log.err("Failed to open '{s}': {}", .{ grub_cfg_path, err });
+        // This might fail if the file doesn't exist, which is okay.
+        // We'll continue to the next test.
+        log.info("--- File read test skipped ---", .{});
+        log.info("=== VFS Tests Complete ===", .{});
+        return;
+    };
+    defer vfs.vfs_close(file_fd) catch {};
+
+    log.info("Successfully opened '{s}' as fd {}", .{ grub_cfg_path, file_fd });
+
+    var file_stat: vfs.VfsStat = undefined;
+    vfs.vfs_stat(grub_cfg_path, &file_stat) catch |err| {
+        log.err("Failed to stat '{s}': {}", .{ grub_cfg_path, err });
+        return;
+    };
+
+    log.info("Stat for '{s}': size={}", .{ grub_cfg_path, file_stat.st_size });
+
+    if (file_stat.st_size > 0) {
+        var read_buffer = (state.getKernelAllocator() orelse return).alloc(
+            u8,
+            file_stat.st_size,
+        ) catch |err| {
+            log.err("Failed to allocate buffer for file read: {}", .{err});
+            return;
+        };
+        defer (state.getKernelAllocator() orelse @panic("Could not")).free(read_buffer);
+
+        const bytes_read = vfs.vfs_read(file_fd, read_buffer) catch |err| {
+            log.err("Failed to read from '{s}': {}", .{ grub_cfg_path, err });
+            return;
+        };
+
+        log.info("Read {} bytes from '{s}':", .{ bytes_read, grub_cfg_path });
+        log.info("--- FILE CONTENT START ---", .{});
+        print("{s}", .{read_buffer[0..bytes_read]});
+        log.info("--- FILE CONTENT END ---", .{});
+    } else {
+        log.info("File '{s}' is empty.", .{grub_cfg_path});
+    }
+
+    log.info("--- Testing non-existent file ---", .{});
+    const non_existent_path = "/this/file/does/not/exist.txt";
+    if (vfs.vfs_open(non_existent_path, vfs.FileDescriptor.O_RDONLY)) |_| {
+        log.err(
+            "Opened a non-existent file '{s}', which should not happen.",
+            .{non_existent_path},
+        );
+    } else |err| {
+        if (err == error.NotFound) {
+            log.info(
+                "Correctly failed to open non-existent file with error: {}",
+                .{err},
+            );
+        } else {
+            log.err(
+                "Incorrect error when opening non-existent file: {}",
+                .{err},
+            );
+        }
+    }
+
     log.info("=== VFS Tests Complete ===", .{});
+}
+
+pub fn kputc(ch: u8) void {
+    // arch.cpu.cli(); // Ensure atomic character output
+    // defer arch.cpu.sti();
+
+    if (drivers.vga.initialized and state.options.vga_printing) {
+        drivers.vga.putChar(ch);
+    }
+    if (state.stdio_init and drivers.serial_log.isInitialised(state.stdio_port)) {
+        drivers.serial_log.write(ch, state.stdio_port);
+    }
 }

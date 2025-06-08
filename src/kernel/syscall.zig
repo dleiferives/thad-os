@@ -1,8 +1,8 @@
-// src/kernel/syscall.zig
 const std = @import("std");
 const thread = @import("thread.zig");
 const arch = @import("arch");
 const kernel = @import("kernel.zig");
+const drivers = @import("drivers"); // Import drivers
 
 pub const SyscallError = error{
     InvalidSyscall,
@@ -17,6 +17,8 @@ pub const SyscallNumber = enum(u64) {
     THREAD_EXIT = 2,
     THREAD_CREATE = 3,
     THREAD_JOIN = 4,
+    PUTC = 5, // New
+    GETC = 6, // New
 };
 
 pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
@@ -35,10 +37,29 @@ pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
         .THREAD_JOIN => {
             handleThreadJoin(frame);
         },
+        .PUTC => {
+            handlePutc(frame);
+        },
+        .GETC => {
+            handleGetc(frame);
+        },
         .INVALID => {
             frame.rax = @intFromError(SyscallError.InvalidSyscall);
         },
     }
+}
+
+fn handlePutc(frame: *arch.irq.InterruptFrame) void {
+    const char_to_print = @as(u8, @truncate(frame.rdi));
+    kernel.kputc(char_to_print);
+    // Return the character printed in rax as a convention
+    frame.rax = char_to_print;
+}
+
+fn handleGetc(frame: *arch.irq.InterruptFrame) void {
+    // This is a blocking call. The scheduler will handle yielding.
+    const char_read = drivers.keyboard.KeyboardBuffer.getc();
+    frame.rax = char_read;
 }
 
 const yield_log = std.log.scoped(.thread_yield);

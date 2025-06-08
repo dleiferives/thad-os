@@ -562,8 +562,8 @@ pub const Ex2Filesystem = struct {
 
         defer superblock_slice.free();
         const sb = superblock.fromBytes(superblock_slice.data);
-        printStruct(drivers.block_device.DataSlice, superblock_slice);
-        printStruct(superblock, sb);
+        // printStruct(drivers.block_device.DataSlice, superblock_slice);
+        // printStruct(superblock, sb);
         if (!sb.isValid()) return false;
 
         self.superblock = sb;
@@ -581,7 +581,7 @@ pub const Ex2Filesystem = struct {
         self.block_groups = try self.allocator.alloc(block_group_desc, self.superblock.num_block_groups);
         for (0..self.superblock.num_block_groups) |i| {
             self.block_groups[i] = block_group_desc.fromBytes(block_groups_slice.data[i * 32 .. (i + 1) * 32]);
-            printStruct(block_group_desc, self.block_groups[i]);
+            // printStruct(block_group_desc, self.block_groups[i]);
         }
     }
 
@@ -788,7 +788,7 @@ pub const Ext2FilesystemIterator = struct {
             };
             if (fs_n) |fs| {
                 // Successfully created an ext2 filesystem
-                std.log.info("Found ext2 filesystem on device: {any}, partition: {any}", .{self.dev.?, ent});
+                std.log.info("Found ext2 filesystem on device: {*}, partition: at {}", .{self.dev.?, ent.lba_first_absolute});
                 self.partition_entry = ent;
                 return fs; // Return the filesystem
             } else {
@@ -799,7 +799,7 @@ pub const Ext2FilesystemIterator = struct {
 
         } else {
             // No more partition entries, move to the next device
-            std.log.info("No more partition entries for device: {any}, moving to the next device.", .{self.dev.?});
+            std.log.info("No more partition entries for device: {*}, moving to the next device.", .{self.dev.?});
             self.dev = self.block_device_iter.next();
             self.partition_entry_iter = null;
             self.partition_entry = null;

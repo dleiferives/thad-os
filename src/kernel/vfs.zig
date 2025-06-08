@@ -332,7 +332,7 @@ pub const VfsContext = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        log.info("Mounting {} filesystem at {s}", .{ fs_type, mountpoint });
+        log.info("Mounting {s} filesystem at {s}", .{ fs_type, mountpoint });
 
         const mount_l = self.allocator.create(VfsMount) catch {
             return VfsError.OutOfMemory;
@@ -370,6 +370,7 @@ pub const VfsContext = struct {
 
     pub fn resolvePath(self: *Self, path: []const u8) VfsError!*VfsNode {
         if (self.root_node == null) {
+            log.err("VFS root node not initialized", .{});
             return VfsError.NotFound;
         }
 
@@ -384,7 +385,7 @@ pub const VfsContext = struct {
             return current; // Root directory
         }
 
-        var path_iter = std.mem.split(u8, path[1..], "/");
+        var path_iter = std.mem.splitAny(u8, path[1..], "/");
         while (path_iter.next()) |component| {
             if (component.len == 0) continue; // Skip empty components
 

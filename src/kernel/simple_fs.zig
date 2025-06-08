@@ -56,7 +56,13 @@ pub const SimpleNode = struct {
         return node;
     }
 
-    pub fn createExt2Node(allocator: std.mem.Allocator, name: []const u8, ext2_fs: *ext2.Ex2Filesystem, inode: ext2.inode_table_entry, inode_num: u64) !*Self {
+    pub fn createExt2Node(
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        ext2_fs: *ext2.Ex2Filesystem,
+        inode: ext2.inode_table_entry,
+        inode_num: u64,
+    ) !*Self {
         const node = try allocator.create(Self);
 
         const name_copy = try allocator.dupe(u8, name);
@@ -108,7 +114,10 @@ pub const SimpleNode = struct {
         };
     }
 
-    fn readdir(node: *vfs.VfsNode, ctx: *vfs.ReaddirContext) vfs.VfsError!void {
+    fn readdir(
+        node: *vfs.VfsNode,
+        ctx: *vfs.ReaddirContext,
+    ) vfs.VfsError!void {
         const self: *Self = @ptrCast(@alignCast(node.private_data.?));
 
         if (!self.is_directory) {
@@ -124,7 +133,9 @@ pub const SimpleNode = struct {
         try ctx.emit(&dirent);
 
         if (node.parent) |parent| {
-            const parent_node: *Self = @ptrCast(@alignCast(parent.private_data.?));
+            const parent_node: *Self = @ptrCast(
+                @alignCast(parent.private_data.?)
+            );
             dirent = vfs.VfsDirent{
                 .d_ino = parent_node.inode_number,
                 .d_type = vfs.VfsDirent.DT_DIR,
@@ -149,7 +160,10 @@ pub const SimpleNode = struct {
             for (self.children.?.items) |child| {
                 dirent = vfs.VfsDirent{
                     .d_ino = child.inode_number,
-                    .d_type = if (child.is_directory) vfs.VfsDirent.DT_DIR else vfs.VfsDirent.DT_REG,
+                    .d_type = if (child.is_directory)
+                        vfs.VfsDirent.DT_DIR
+                    else
+                        vfs.VfsDirent.DT_REG,
                     .d_name = child.vfs_node.name,
                 };
                 try ctx.emit(&dirent);
@@ -157,7 +171,10 @@ pub const SimpleNode = struct {
         }
     }
 
-    fn readdirExt2(self: *Self, ctx: *vfs.ReaddirContext) vfs.VfsError!void {
+    fn readdirExt2(
+        self: *Self,
+        ctx: *vfs.ReaddirContext,
+    ) vfs.VfsError!void {
         if (self.ext2_fs == null or self.ext2_inode == null) {
             return;
         }
@@ -169,7 +186,8 @@ pub const SimpleNode = struct {
             return vfs.VfsError.NotDirectory;
         }
 
-        const num_blocks = (inode.blocks_count * 512) / ext2_fs.superblock.block_size;
+        const num_blocks = (inode.blocks_count * 512) /
+            ext2_fs.superblock.block_size;
         var block_index: u32 = 0;
 
         while (block_index < num_blocks) : (block_index += 1) {
@@ -181,7 +199,9 @@ pub const SimpleNode = struct {
 
             var offset: usize = 0;
             while (offset < block_slice.data.len) {
-                const entry = ext2.directory_entry.fromBytes(block_slice.data[offset..]);
+                const entry = ext2.directory_entry.fromBytes(
+                    block_slice.data[offset..]
+                );
                 if (entry.rec_len == 0) break;
 
                 if (entry.inode != 0) { // Valid entry
@@ -210,7 +230,10 @@ pub const SimpleNode = struct {
         }
     }
 
-    fn lookup(node: *vfs.VfsNode, name: []const u8) vfs.VfsError!*vfs.VfsNode {
+    fn lookup(
+        node: *vfs.VfsNode,
+        name: []const u8,
+    ) vfs.VfsError!*vfs.VfsNode {
         const self: *Self = @ptrCast(@alignCast(node.private_data.?));
 
         if (!self.is_directory) {
@@ -255,7 +278,10 @@ pub const SimpleNode = struct {
         return vfs.VfsError.NotFound;
     }
 
-    fn lookupExt2(self: *Self, name: []const u8) vfs.VfsError!*vfs.VfsNode {
+    fn lookupExt2(
+        self: *Self,
+        name: []const u8,
+    ) vfs.VfsError!*vfs.VfsNode {
         if (self.ext2_fs == null or self.ext2_inode == null) {
             return vfs.VfsError.NotFound;
         }
@@ -263,7 +289,8 @@ pub const SimpleNode = struct {
         const ext2_fs = self.ext2_fs.?;
         const inode = self.ext2_inode.?;
 
-        const num_blocks = (inode.blocks_count * 512) / ext2_fs.superblock.block_size;
+        const num_blocks = (inode.blocks_count * 512) /
+            ext2_fs.superblock.block_size;
         var block_index: u32 = 0;
 
         while (block_index < num_blocks) : (block_index += 1) {
@@ -272,7 +299,9 @@ pub const SimpleNode = struct {
 
             var offset: usize = 0;
             while (offset < block_slice.data.len) {
-                const entry = ext2.directory_entry.fromBytes(block_slice.data[offset..]);
+                const entry = ext2.directory_entry.fromBytes(
+                    block_slice.data[offset..]
+                );
                 if (entry.rec_len == 0) break;
 
                 if (entry.inode != 0 and std.mem.eql(u8, entry.getName(), name)) {
@@ -286,7 +315,7 @@ pub const SimpleNode = struct {
                         name,
                         ext2_fs,
                         child_inode,
-                        entry.inode
+                        entry.inode,
                     ) catch {
                         return vfs.VfsError.OutOfMemory;
                     };
@@ -303,23 +332,70 @@ pub const SimpleNode = struct {
         return vfs.VfsError.NotFound;
     }
 
-    fn read(node: *vfs.VfsNode, offset: u64, buffer: []u8) vfs.VfsError!usize {
+    fn read(
+        node: *vfs.VfsNode,
+        offset: u64,
+        buffer: []u8,
+    ) vfs.VfsError!usize {
         const self: *Self = @ptrCast(@alignCast(node.private_data.?));
 
         if (self.is_directory) {
             return vfs.VfsError.IsDirectory;
         }
 
-        if (self.ext2_fs == null or self.ext2_inode == null) {
-            return vfs.VfsError.NotSupported;
+        const ext2_fs = self.ext2_fs orelse return vfs.VfsError.NotSupported;
+        const inode = self.ext2_inode orelse return vfs.VfsError.NotSupported;
+
+        // Check for read beyond EOF
+        if (offset >= self.file_size) {
+            return 0;
         }
 
-        // TODO: Implement ext2 file reading
-        _ = offset;
-        _ = buffer;
+        const bytes_to_read = @min(buffer.len, self.file_size - offset);
+        if (bytes_to_read == 0) {
+            return 0;
+        }
 
-        log.warn("File reading not yet implemented for ext2", .{});
-        return vfs.VfsError.NotSupported;
+        const block_size = ext2_fs.superblock.block_size;
+        var bytes_read_so_far: usize = 0;
+        var current_offset_in_file = offset;
+
+        while (bytes_read_so_far < bytes_to_read) {
+            const current_block_index: u32 = @intCast(
+                current_offset_in_file / block_size
+            );
+            const offset_in_block: usize = @intCast(
+                current_offset_in_file % block_size
+            );
+
+            var block_slice = ext2_fs.readInodeBlock(
+                inode,
+                current_block_index,
+            ) catch |err| {
+                log.err(
+                    "Failed to read inode block {}: {}",
+                    .{ current_block_index, err },
+                );
+                return vfs.VfsError.IoError;
+            };
+            defer block_slice.free();
+
+            const bytes_to_copy_from_this_block = @min(
+                @as(usize, @intCast(block_size)) - offset_in_block,
+                bytes_to_read - bytes_read_so_far,
+            );
+
+            const src_slice = block_slice.data[offset_in_block .. offset_in_block +
+                bytes_to_copy_from_this_block];
+            const dest_slice = buffer[bytes_read_so_far .. bytes_read_so_far +
+                bytes_to_copy_from_this_block];
+            @memcpy(dest_slice, src_slice);
+
+            bytes_read_so_far += bytes_to_copy_from_this_block;
+            current_offset_in_file += bytes_to_copy_from_this_block;
+        }
+
+        return bytes_read_so_far;
     }
 
     fn release(node: *vfs.VfsNode) void {
@@ -338,11 +414,20 @@ pub const SimpleNode = struct {
 };
 
 // Mount an ext2 filesystem as root
-pub fn mountExt2Root(allocator: std.mem.Allocator, ext2_fs: *ext2.Ex2Filesystem) !void {
+pub fn mountExt2Root(
+    allocator: std.mem.Allocator,
+    ext2_fs: *ext2.Ex2Filesystem,
+) !void {
     log.info("Mounting ext2 filesystem as root", .{});
 
     const root_inode = try ext2_fs.getInode(2); // Root inode
-    const root_node = try SimpleNode.createExt2Node(allocator, "/", ext2_fs, root_inode, 2);
+    const root_node = try SimpleNode.createExt2Node(
+        allocator,
+        "/",
+        ext2_fs,
+        root_inode,
+        2,
+    );
 
     try vfs.mount("/", &root_node.vfs_node, "ext2");
     log.info("Ext2 root filesystem mounted successfully", .{});
