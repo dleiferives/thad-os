@@ -3,110 +3,117 @@ const mem = @import("../mem.zig");
 const log = std.log.scoped(.mem_allocator);
 const log_verbose = std.log.scoped(.mem_allocator_verbose);
 
-// free list allocator
-// start by preallocating a region (1Mb)
-// if more memory is requested try to expand said region.
-
-
-
 pub const Header = packed struct {
-    //  8
     next: ?*Header,
-
-    // the size of the allocated space
-    // not including the header!
-    // 4
-    size: u32,
-    // the starting position of the allocation
-    // this can be used to compute the lenght of the allocation
-    // 4
-    offset: u32,
-    // the alignment of course
-    // 1
-    alignment: std.mem.Alignment,
-
+    size: u32, // Size of usable space (excluding header)
     free: bool,
-
-    // If the header is at the end of the block and not at the start!
-    // used for large alignments!
-    end_pos: bool = false,
-
-    // if the offset is from the start,
-    // or from the end.
-    offset_start: bool = false,
+    _padding1: u8 = 0,
+    _padding2: u8 = 0,
+    _padding3: u8 = 0,
 
     pub const Iterator = struct {
         current: ?*Header,
+        visited_count: usize = 0,
+        max_visits: usize,
 
         pub fn next(self: *@This()) ?*Header {
+            // Prevent infinite loops
+            if (self.visited_count >= self.max_visits) return null;
+
             if (self.current) |cur| {
                 const tmp = self.current;
                 self.current = cur.next;
+                self.visited_count += 1;
                 return tmp;
             }
             return null;
         }
     };
 
-    pub fn iterator(self: *Header) Iterator {
-        return .{ .current = self };
+    pub fn iterator(self: *Header, max_blocks: usize) Iterator {
+        return .{ .current = self, .max_visits = max_blocks };
     }
 
-    pub fn freeSpace(self: *Header) ?mem.types.MemoryRange {
-        if (self.free) {
-            var start: usize = @intFromPtr(self);
-            var end: usize = start + self.size + @sizeOf(Header);
-            if (self.end_pos) {
-                end = start + @sizeOf(Header);
-                start -= self.size;
-            }
-            return mem.types.MemoryRange{ .start = start, .end = end };
-        }
-
-        // block is not marked as free!
-        if (self.offset == 0) return null;
-
-        if (self.end_pos and !self.offset_start) {
-            // I don't want to handle this case for now.. so lets not
-            // as this would require splitting the block
-            return null;
-        }
-
-        if (!self.end_pos and self.offset_start) {
-            // I also don't want to handle this so let's not
-            return null;
-        }
-
-        if (self.end_pos and self.offset_start) {
-            // Here we can look at the space that is given in the offset
-            const alloc_start = @intFromPtr(self) - self.size;
-            return mem.types.MemoryRange{ .start = alloc_start, .end = alloc_start + self.offset };
-        }
-
-        if (!self.end_pos and !self.offset_start) {
-            const alloc_end = @intFromPtr(self) + @sizeOf(Header) + self.size;
-            const alloc_start = alloc_end - self.offset;
-            return mem.types.MemoryRange{ .start = alloc_start, .end = alloc_end };
-        }
-
-        return null;
+    pub fn getDataPtr(self: *Header) [*]u8 {
+        return @as([*]u8, @ptrCast(self)) + @sizeOf(Header);
     }
 
-    pub fn getAllocRange(self: *Header) mem.types.MemoryRange {
-        var result: mem.types.MemoryRange = undefined;
-        result.start = if (self.end_pos) @intFromPtr(self) - self.size else @intFromPtr(self) + @sizeOf(Header);
-        result.end = result.start + self.size;
-        if (self.offset_start) {
-            result.start += self.offset;
-        } else {
-            result.end -= self.offset;
+    pub fn getEndPtr(self: *Header) [*]u8 {
+        return @as([*]u8, @ptrCast(self)) + @sizeOf(Header) + self.size;
+    }
+
+    pub fn getTotalSize(self: *Header) usize {
+        return @sizeOf(Header) + self.size;
+    }
+
+    pub fn isAdjacent(self: *Header, other: *Header) bool {
+        return self.getEndPtr() == @as([*]u8, @ptrCast(other)) or
+               other.getEndPtr() == @as([*]u8, @ptrCast(self));
+    }
+
+    pub fn canFit(self: *Header, size: usize, alignment: std.mem.Alignment) bool {
+        if (!self.free) return false;
+
+        const data_ptr = self.getDataPtr();
+        const aligned_ptr: [*]u8 = @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(data_ptr), alignment.toByteUnits()));
+        const offset = @intFromPtr(aligned_ptr) - @intFromPtr(data_ptr);
+
+        return (offset + size) <= self.size;
+    }
+
+    // Returns true if a split occurred, false if using whole block
+    pub fn split(self: *Header, size: usize, alignment: std.mem.Alignment) bool {
+        if (!self.canFit(size, alignment)) return false;
+
+        const data_ptr = self.getDataPtr();
+        const aligned_ptr: [*]u8 = @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(data_ptr), alignment.toByteUnits()));
+        const offset = @intFromPtr(aligned_ptr) - @intFromPtr(data_ptr);
+
+        // Calculate how much space we actually need (including alignment offset)
+        const space_needed = offset + size;
+
+        // Align the position for the next header to @sizeOf(Header) boundary
+        const unaligned_remainder_pos = @intFromPtr(self.getDataPtr()) + space_needed;
+        const aligned_remainder_pos = std.mem.alignForward(usize, unaligned_remainder_pos, @sizeOf(Header));
+        const actual_space_used = aligned_remainder_pos - @intFromPtr(self.getDataPtr());
+
+        // Calculate remaining space after this allocation and header alignment
+        const remaining_total_space = self.size - actual_space_used;
+
+        // If there's not enough space left for a meaningful block, use the whole block
+        if (remaining_total_space < @sizeOf(Header) + 8) {
+            self.free = false;
+            log_verbose.info("Using whole block: size={}, needed={}", .{self.size, space_needed});
+            return false; // No split occurred
         }
-        return result;
+
+        // Place the remainder header at the aligned position
+        const new_header: *Header = @ptrFromInt(aligned_remainder_pos);
+
+        // Initialize the remainder header
+        new_header.* = Header{
+            .next = self.next,
+            .size = @intCast(remaining_total_space - @sizeOf(Header)),
+            .free = true,
+        };
+
+        // Update current header to point to remainder and mark as allocated
+        self.next = new_header;
+        self.size = @intCast(actual_space_used);
+        self.free = false;
+
+        log_verbose.info("Split block: allocated_size={}, remainder_size={}, remainder_pos=0x{x}", .{
+            actual_space_used,
+            new_header.size,
+            aligned_remainder_pos
+        });
+
+        return true; // Split occurred
     }
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Header) == 32);
+    std.debug.assert(@sizeOf(Header) == 16);
 }
 
 pub const FreeListAllocator = struct {
@@ -115,39 +122,40 @@ pub const FreeListAllocator = struct {
     end: usize,
     mapper: *mem.Mapper,
     flags: mem.PageFlags,
-    // log: @TypeOf(log_verbose),
+    total_blocks: usize,
 
-    // required for resize
-    last_allocation_len: usize = 0,
-
-    pub const MIN_ALLOC_SIZE = @sizeOf(Header);
+    pub const MIN_ALLOC_SIZE = 8;
+    pub const MAX_BLOCKS = 10000; // Prevent infinite loops
 
     pub fn init(start: usize, initial_size: usize, mapper: *mem.Mapper, flags: mem.PageFlags) !FreeListAllocator {
+        if (initial_size < @sizeOf(Header) + MIN_ALLOC_SIZE) {
+            return error.InitialSizeTooSmall;
+        }
+
         var allocator_er = FreeListAllocator{
             .headers = null,
             .start = start,
             .end = start + initial_size,
             .flags = flags,
             .mapper = mapper,
+            .total_blocks = 1,
         };
 
-        // map the first page
-        log.info("Initializing FreeListAllocator at {x} with size {d}", .{ start, initial_size });
-        const demand_state = try allocator_er.mapper.mapDemandRange(allocator_er.start, initial_size, allocator_er.flags);
+        log.info("Initializing FreeListAllocator at 0x{x} with size {d}", .{ start, initial_size });
+
+        const demand_state = try allocator_er.mapper.mapDemandRange(start, initial_size, flags);
         if (!demand_state) {
-            // we have a demand state, so we need to initialize the headers
-            @panic("we have to hanlde cleanup of the demand state");
+            return error.MappingFailed;
         }
+
+        // Initialize first header
         allocator_er.headers = @ptrFromInt(start);
         allocator_er.headers.?.* = Header{
             .next = null,
             .size = @intCast(initial_size - @sizeOf(Header)),
-            .offset = 0,
             .free = true,
-            .end_pos = false,
-            .offset_start = false,
-            .alignment = std.mem.Alignment.@"1",
         };
+
         return allocator_er;
     }
 
@@ -157,272 +165,224 @@ pub const FreeListAllocator = struct {
             .vtable = &std.mem.Allocator.VTable{
                 .alloc = alloc,
                 .resize = resize,
-                .remap = remap,
                 .free = free,
+                .remap = remap,
             },
         };
     }
 
-    pub fn findFreeSpace(self: *FreeListAllocator, len_: usize, alignment: std.mem.Alignment) ?*Header {
-        var head_iter = if(self.headers) |h| h.iterator() else return null;
-        const len: u64 = std.mem.alignForward(u64,len_,@sizeOf(Header));
-        var prev: ?*Header = null;
-        while (head_iter.next()) |head| : (prev = head) {
-            log_verbose.info("We have found a head",.{});
-            // we now have a header.. lets see if it has free space
-            if (Header.freeSpace(@constCast(head))) |*free_space| {
-                log.info("we have found free space of size {}",.{free_space.get_size()});
-                var end: bool = false;
-                var space: ?mem.types.MemoryRange = aligned_start: {
-                    var aligned_start_space = free_space.alignStartTo(alignment.toByteUnits());
-                    // for now we're only doing next to each other regions
-                    aligned_start_space.end -= @sizeOf(Header);
-                    if (!aligned_start_space.is_valid()) break :aligned_start null;
-                    if (aligned_start_space.get_size() < len) break :aligned_start null;
-                    end = true;
-                    log_verbose.info("We have found an end",.{});
-                    break :aligned_start aligned_start_space;
-                };
+    fn findHeader(self: *FreeListAllocator, ptr: [*]u8) ?*Header {
+        if (self.headers == null) return null;
 
-                if (space == null) space = aligned_end: {
-                    var aligned_end_space = mem.types.MemoryRange{.start = free_space.start, .end = free_space.end};
-                    aligned_end_space.start += @sizeOf(Header);
+        var iter = self.headers.?.iterator(self.total_blocks);
+        while (iter.next()) |header| {
+            const data_start = @intFromPtr(header.getDataPtr());
+            const data_end = data_start + header.size;
+            const ptr_addr = @intFromPtr(ptr);
 
-                    aligned_end_space = aligned_end_space.alignStartTo(alignment.toByteUnits());
-                    // for now we're only doing next to each other regions
-                    if (!aligned_end_space.is_valid()) break :aligned_end null;
-                    if (aligned_end_space.get_size() < len) break :aligned_end null;
-
-                    // note we're only allowing it if the free space matches directly with the aligned space!
-                    if (aligned_end_space.start != free_space.start + @sizeOf(Header)) break :aligned_end null;
-                    end = false;
-                    log_verbose.info("We have found an start",.{});
-                    break :aligned_end aligned_end_space;
-                };
-
-                if (space == null) continue;
-
-                const new_space = space.?;
-                log_verbose.info("We have applicatble space, 0x{X:0>16} -> 0x{X:0>16}",.{new_space.start, new_space.end});
-
-
-                // we've found some free space.
-                // let's turn that into the header we want
-                var result: *Header = undefined;
-                if (end) {
-                    // our header goes at the end!
-                    result = @ptrFromInt(new_space.end);
-                    result.size = @intCast(free_space.get_size());
-                    result.size -= @sizeOf(Header);
-                    result.offset = result.size;
-                    result.offset -=  @intCast(len);
-                    result.alignment = alignment;
-                    result.free = true;
-                    result.end_pos = true;
-                    result.offset_start = true;
-                    const r = result.getAllocRange();
-                    log_verbose.info("allocated range is 0x{X:0>16} -> 0x{X:0>16}",.{r.start, r.end});
-                    log.info("There is an offset of {}",.{result.offset});
-                } else {
-                    // our headder goes at the start
-                    result = @ptrFromInt(new_space.start);
-                    result.size = @intCast(free_space.get_size());
-                    result.size -= @sizeOf(Header);
-                    result.offset = result.size;
-                    result.offset -=  @intCast(len);
-                    // result.offset = result.size - @as(u32,@truncate(new_space.get_size()));
-                    // result.offset-=  @intCast(len);
-                    result.alignment = alignment;
-                    result.free = true;
-                    result.end_pos = false;
-                    result.offset_start = false;
-                    log.info("There is an offset of {}",.{result.offset});
-                }
-
-                if (head.free) {
-                    // we can replace
-                    log.info("From a free head",.{});
-                    if (prev) |phead| {
-                        // there is a previous entry. they should point to us.
-                        phead.next = result;
-                    } else {
-                        // this is the header!
-                        self.headers = result;
-                    }
-                } else {
-                    // remove ourselves from the header we spliced off of
-                    if (head.end_pos != head.offset_start){
-                        log.info("we are not at the start of the splice",.{});
-                        unreachable;
-                    }
-                    log.info("Setting the size off",.{});
-                    head.size -= head.offset;
-                    head.offset = 0;
-                }
-
-                result.next = head.next;
-                head.next = result;
-                log.info("returning",.{});
-
-                const r = result.getAllocRange();
-                log_verbose.info("allocated range is 0x{X:0>16} -> 0x{X:0>16}",.{r.start, r.end});
-                return result;
-            } else continue;
-        }
-        return null;
-    }
-
-    pub fn findHeader(self: *FreeListAllocator, addr: usize) ?*Header {
-        var head_iter = if(self.headers) |h| h.iterator() else return null;
-        while (head_iter.next()) |cursor| {
-            if (cursor.getAllocRange().contains(addr)) {
-                return cursor;
+            if (ptr_addr >= data_start and ptr_addr < data_end) {
+                return header;
             }
         }
         return null;
     }
 
-    /// Return a pointer to `len` bytes with specified `alignment`, or return
-    /// `null` indicating the allocation failed.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    pub fn alloc(self_: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+    fn coalesceFreeBLocks(self: *FreeListAllocator) void {
+        if (self.headers == null) return;
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var iter = self.headers.?.iterator(self.total_blocks);
+            while (iter.next()) |header| {
+                if (!header.free) continue;
+
+                // Try to coalesce with next block
+                if (header.next) |next_header| {
+                    if (next_header.free and header.isAdjacent(next_header)) {
+                        header.size += @sizeOf(Header) + next_header.size;
+                        header.next = next_header.next;
+                        self.total_blocks -= 1;
+                        changed = true;
+                        log_verbose.info("Coalesced blocks, new size: {}", .{header.size});
+                        break; // Restart iteration
+                    }
+                }
+            }
+        }
+    }
+
+    fn findFreeBlock(self: *FreeListAllocator, size: usize, alignment: std.mem.Alignment) ?*Header {
+        if (self.headers == null) return null;
+
+        var iter = self.headers.?.iterator(self.total_blocks);
+        while (iter.next()) |header| {
+            if (header.canFit(size, alignment)) {
+                log_verbose.info("Found suitable block: size={}, needed={}, free={}", .{header.size, size, header.free});
+                return header;
+            }
+        }
+        return null;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         _ = ret_addr;
         if (len == 0) return null;
-        var self: *FreeListAllocator = @ptrCast(@alignCast(self_));
 
-        // Figure out if we have enough space
-        if (self.findFreeSpace(len, alignment)) |free_header| {
-            // - If we do have enough space. Allocate within that
-            free_header.free = false;
-            const range = free_header.getAllocRange();
+        var self: *FreeListAllocator = @ptrCast(@alignCast(ctx));
+        const size = std.mem.alignForward(usize, @max(len, MIN_ALLOC_SIZE), @sizeOf(usize));
 
-            log_verbose.info("allocated range is 0x{X:0>16} -> 0x{X:0>16}",.{range.start, range.end});
-            self.last_allocation_len = len;
-            const res: [*]u8 = @ptrFromInt(range.start);
-            for(0..len) |i| {
-                res[i] = 0;
+        log_verbose.info("Allocating {} bytes (rounded to {})", .{len, size});
+
+        // Try to coalesce free blocks first
+        self.coalesceFreeBLocks();
+
+        if (self.findFreeBlock(size, alignment)) |header| {
+            const split_occurred = header.split(size, alignment);
+            if (split_occurred) {
+                self.total_blocks += 1; // We created a new remainder block
             }
-            return res;
-        } else {
-            log.info("We do not have enough space!",.{});
-            // + Not enough space we ask for more
-            // ++ If we don't get space, return null, allocation failed.
-            // +- If we receive that space, repeat alloc
-            unreachable;
+
+            const data_ptr = header.getDataPtr();
+            const aligned_ptr: [*]u8 = @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(data_ptr), alignment.toByteUnits()));
+
+            // Zero out the memory
+            @memset(aligned_ptr[0..len], 0);
+
+            log_verbose.info("Allocated {} bytes at 0x{x}", .{ len, @intFromPtr(aligned_ptr) });
+            return aligned_ptr;
         }
+
+        log.info("Allocation failed: no suitable block found for {} bytes", .{size});
+        self.debugPrint();
         return null;
     }
 
-    /// Attempt to expand or shrink memory in place.
-    ///
-    /// `memory.len` must equal the length requested from the most recent
-    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-    /// equal the same value that was passed as the `alignment` parameter to
-    /// the original `alloc` call.
-    ///
-    /// A result of `true` indicates the resize was successful and the
-    /// allocation now has the same address but a size of `new_len`. `false`
-    /// indicates the resize could not be completed without moving the
-    /// allocation to a different address.
-    ///
-    /// `new_len` must be greater than zero.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    pub fn resize(self_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        var self: *FreeListAllocator = @ptrCast(@alignCast(self_));
+    fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         _ = ret_addr;
-        if (memory.len != self.last_allocation_len) return false;
-        const addr = @intFromPtr(&memory[0]);
-        if (self.findHeader(addr)) |header| {
-            if (header.alignment != alignment) return false;
-            if (new_len < header.size) {
-                header.offset = header.size - @as(u32,@truncate(new_len));
-                self.last_allocation_len = new_len;
-                return true;
+        if (new_len == 0) return false;
+
+        var self: *FreeListAllocator = @ptrCast(@alignCast(ctx));
+
+        if (self.findHeader(buf.ptr)) |header| {
+            if (!header.free) {
+                const new_size = std.mem.alignForward(usize, @max(new_len, MIN_ALLOC_SIZE), @sizeOf(usize));
+                const data_ptr = header.getDataPtr();
+                const aligned_ptr: [*]u8 = @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(data_ptr), buf_align.toByteUnits()));
+                const offset = @intFromPtr(aligned_ptr) - @intFromPtr(data_ptr);
+
+                // Check if we can shrink
+                if (new_size <= header.size - offset) {
+                    log_verbose.info("Resized allocation from {} to {} bytes", .{ buf.len, new_len });
+                    return true;
+                }
             }
-            return false;
         }
+
         return false;
     }
 
-    /// Attempt to expand or shrink memory, allowing relocation.
-    ///
-    /// `memory.len` must equal the length requested from the most recent
-    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-    /// equal the same value that was passed as the `alignment` parameter to
-    /// the original `alloc` call.
-    ///
-    /// A non-`null` return value indicates the resize was successful. The
-    /// allocation may have same address, or may have been relocated. In either
-    /// case, the allocation now has size of `new_len`. A `null` return value
-    /// indicates that the resize would be equivalent to allocating new memory,
-    /// copying the bytes from the old memory, and then freeing the old memory.
-    /// In such case, it is more efficient for the caller to perform the copy.
-    ///
-    /// `new_len` must be greater than zero.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    pub fn remap(self_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        var self: *FreeListAllocator = @ptrCast(@alignCast(self_));
-        if (memory.len != self.last_allocation_len) return null;
-        if (!FreeListAllocator.resize(self_,memory, alignment, new_len, ret_addr)) {
-            if (FreeListAllocator.alloc(self_,new_len, alignment, ret_addr)) |allocation| {
-                if (new_len < memory.len) {
-                    for (0..new_len) |i| allocation[i] = memory[i];
-                } else {
-                    for (memory, 0..) |entry, i| allocation[i] = entry;
-                }
-                self.last_allocation_len = new_len;
-                return allocation;
-            } else return null;
-        } else {
-            const addr: usize = @intFromPtr(&memory[0]);
-            return @ptrFromInt(addr);
+    fn remap(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        if (new_len == 0) return null;
+
+        // Try resize first
+        if (resize(ctx, buf, buf_align, new_len, ret_addr)) {
+            return buf.ptr;
         }
+
+        // If resize failed, allocate new memory, copy, and free old
+        if (alloc(ctx, new_len, buf_align, ret_addr)) |new_ptr| {
+            const copy_len = @min(buf.len, new_len);
+            @memcpy(new_ptr[0..copy_len], buf[0..copy_len]);
+            free(ctx, buf, buf_align, ret_addr);
+            return new_ptr;
+        }
+
+        return null;
     }
 
-    /// Free and invalidate a region of memory.
-    ///
-    /// `memory.len` must equal the length requested from the most recent
-    /// successful call to `alloc`, `resize`, or `remap`. `alignment` must
-    /// equal the same value that was passed as the `alignment` parameter to
-    /// the original `alloc` call.
-    ///
-    /// `ret_addr` is optionally provided as the first return address of the
-    /// allocation call stack. If the value is `0` it means no return address
-    /// has been provided.
-    pub fn free(self_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        var self: *FreeListAllocator = @ptrCast(@alignCast(self_));
-        if (memory.len != self.last_allocation_len) return;
-        if (self.findHeader(@intFromPtr(&memory[0]))) |header| {
-            if (header.alignment != alignment) return;
-            header.free = true;
-        }
+    fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
+        _ = buf_align;
         _ = ret_addr;
+
+        var self: *FreeListAllocator = @ptrCast(@alignCast(ctx));
+
+        if (self.findHeader(buf.ptr)) |header| {
+            if (!header.free) {
+                header.free = true;
+                log_verbose.info("Freed {} bytes at 0x{x}", .{ buf.len, @intFromPtr(buf.ptr) });
+
+                // Coalesce immediately after freeing
+                self.coalesceFreeBLocks();
+            }
+        }
     }
 
+    pub fn debugPrint(self: *FreeListAllocator) void {
+        if (self.headers == null) {
+            log.info("No headers", .{});
+            return;
+        }
+
+        log.info("=== Allocator Debug Info ===", .{});
+        log.info("Total blocks: {}", .{self.total_blocks});
+
+        var iter = self.headers.?.iterator(self.total_blocks);
+        var count: usize = 0;
+        while (iter.next()) |header| {
+            log.info("Block {}: ptr=0x{x}, data=0x{x}, size={}, free={}", .{
+                count,
+                @intFromPtr(header),
+                @intFromPtr(header.getDataPtr()),
+                header.size,
+                header.free,
+            });
+            count += 1;
+        }
+    }
 
     pub fn tester(self: *FreeListAllocator) !void {
         const alloca = self.allocator();
-        log.info("Starting test!",.{});
+        log.info("Starting allocator test!", .{});
 
-        log.info("Trying to allocate 10 bytes",.{});
+        // Test basic allocation
+        log.info("Allocating 10 bytes...", .{});
         const bytes = try alloca.alloc(u8, 10);
-        for(bytes,0..) |*byte,i|{
+        defer alloca.free(bytes);
+
+        // Test the memory
+        for (bytes, 0..) |*byte, i| {
             byte.* = @truncate(i);
         }
-        for(bytes,0..) |byte,i|{
-            if(i != byte){
-                log.info("bytes did not align",.{});
-            }
 
+        for (bytes, 0..) |byte, i| {
+            if (i != byte) {
+                log.err("Memory corruption detected at index {}", .{i});
+                return error.MemoryCorruption;
+            }
         }
+
+        log.info("Basic allocation test passed!", .{});
+        self.debugPrint();
+
+        // Test multiple allocations with simpler sizes first
+        log.info("Testing multiple small allocations...", .{});
+        var allocs: [3][]u8 = undefined;
+        for (&allocs, 0..) |*alloc_ptr, i| {
+            const alloc_size = (i + 1) * 8; // Start with smaller sizes
+            log.info("Allocating {} bytes...", .{alloc_size});
+            alloc_ptr.* = try alloca.alloc(u8, alloc_size);
+            log.info("Successfully allocated {} bytes", .{alloc_size});
+            self.debugPrint();
+        }
+
+        log.info("Freeing allocations...", .{});
+        for (allocs, 0..) |allocation, i| {
+            log.info("Freeing allocation {}", .{i});
+            alloca.free(allocation);
+        }
+
+        self.debugPrint();
+        log.info("All tests passed!", .{});
     }
 };

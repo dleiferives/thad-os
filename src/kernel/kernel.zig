@@ -12,6 +12,7 @@ const scheduler = @import("scheduler.zig");
 const snakes = @import("snakes.zig");
 const mbr = @import("mbr.zig");
 const ext2 = @import("ext2.zig");
+const vfs = @import("vfs.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -361,9 +362,12 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         log.info("found ext2 filesystem: {s}", .{fs.superblock.volume_name});
         log.info("There are {} blocks in this filesystem", .{fs.superblock.blocks_count});
         log.info("There are {} block groups in this filesystem", .{fs.block_groups.len});
+        fs.printFullTree() catch |err| {
+            log.err("Failed to print ext2 filesystem tree: {}", .{err});
+            @panic("Failed to print ext2 filesystem tree");
+        };
         fs.deinit(); // Deinitialize the filesystem
     }
-
 
     var i: u64 = 0;
     while(true){
@@ -757,4 +761,52 @@ pub fn testDemandPaging() !void {
     }
 
     log.info("Demand paging test completed successfully!", .{});
+}
+
+
+// Add VFS test function
+fn testVfsOperations() !void {
+    log.info("=== Testing VFS Operations ===", .{});
+
+    // Test opening root directory
+    const root_fd = vfs.vfs_open("/", vfs.FileDescriptor.O_RDONLY | vfs.FileDescriptor.O_DIRECTORY) catch |err| {
+        log.err("Failed to open root directory: {}", .{err});
+        return;
+    };
+    defer vfs.vfs_close(root_fd) catch {};
+
+    log.info("Opened root directory as fd {}", .{root_fd});
+
+    // Test stat on root
+    var root_stat: vfs.VfsStat = undefined;
+    vfs.vfs_stat("/", &root_stat) catch |err| {
+        log.err("Failed to stat root: {}", .{err});
+        return;
+    };
+
+    log.info("Root stat: inode={}, mode=0o{o}, size={}", .{
+        root_stat.st_ino, root_stat.st_mode, root_stat.st_size
+    });
+
+    // Test readdir on root
+    log.info("Reading root directory contents:", .{});
+
+    const ReaddirState = struct {
+        count: u32 = 0,
+
+        fn callback(dirent: *const vfs.VfsDirent, user_data: ?*anyopaque) vfs.VfsError!void {
+            const state_: *@This() = @ptrCast(@alignCast(user_data.?));
+            log.info("  {s} (inode={}, type={})", .{ dirent.d_name, dirent.d_ino, dirent.d_type });
+            state_.count += 1;
+        }
+    };
+
+    var readdir_state = ReaddirState{};
+    vfs.vfs_readdir(root_fd, ReaddirState.callback, &readdir_state) catch |err| {
+        log.err("Failed to readdir root: {}", .{err});
+        return;
+    };
+
+    log.info("Found {} entries in root directory", .{readdir_state.count});
+    log.info("=== VFS Tests Complete ===", .{});
 }

@@ -4,6 +4,7 @@ const mem = @import("mem.zig");
 const arch = @import("arch");
 const Self = @This();
 const log = std.log.scoped(.kernel_thread);
+const vfs = @import("vfs.zig");
 
 pub const NUM_THREADS = 512;
 pub const THREAD_CLEANUP_VECTOR = 129; // Dedicated interrupt for thread cleanup
@@ -108,6 +109,9 @@ pub const Thread = struct {
     next_blocked: ?*Thread = null,
     prev_blocked: ?*Thread = null,
 
+    // File system
+    fd_table: vfs.FdTable,
+
     const ThreadError = error{
         ThreadingNotInitialized,
         OutOfMemory,
@@ -172,6 +176,7 @@ pub const Thread = struct {
             .owning_allocator = allocator,
             .entry_point = entry_fn,
             .entry_arg = arg,
+            .fd_table = vfs.FdTable.init(allocator),
         };
 
         // Allocate kernel stack
@@ -532,6 +537,10 @@ fn cleanupThreadEntry() callconv(.C) noreturn {
 }
 
 fn cleanupThread(thread: *Thread) void {
+
+    // Get ride of file descriptors
+    thread.fd_table.deinit();
+
     // Free user stack if exists
     if (thread.user_stack) |stack| {
         const start = @intFromPtr(stack.ptr);

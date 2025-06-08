@@ -205,8 +205,8 @@ pub const block_group_desc = struct {
     }
 };
 
-pub const inode_table = struct {
-    mode: u16, // file mode (type and permissions)
+pub const inode_table_entry = struct {
+    mode: inode_mode, // file mode (type and permissions)
     uid: u16, // owner user ID
     size: u32, // size in bytes
     atime: u32, // last access time
@@ -215,15 +215,60 @@ pub const inode_table = struct {
     dtime: u32, // deletion time
     gid: u16, // owner group ID
     links_count: u16, // number of hard links
-    blocks_count: u32, // number of blocks allocated to the file
-    flags: u32, // file flags
+    blocks_count: u32, // number of blocks allocated to the file (in 512 byte units...)
+    flags: inode_flags, // file flags
     osd1: [4]u8, // OS-specific data
-    block: [15]u32, // block pointers (direct and indirect)
+    blocks: [12]u32, // block pointers (direct and indirect)
+    indirect_blocks: u32, // single indirect block pointer
+    double_indirect_blocks: u32, // double indirect block pointer
+    triple_indirect_blocks: u32, // triple indirect block pointer
     generation: u32, // file version (generation number)
     file_acl: u32, // file ACL (access control list)
     dir_acl: u32, // directory ACL
     faddr: u32, // fragment address
     osd2: [12]u8, // more OS-specific data
+
+    pub fn fromBytes(bytes: []const u8) inode_table_entry {
+        if (bytes.len < 128) {
+            @panic("Inode table entry bytes must be at least 128 bytes long");
+        }
+        return inode_table_entry{
+            .mode = inode_mode.fromValue(@as(u16, std.mem.bytesToValue(u16, bytes[0..2]))),
+            .uid = @as(u16, std.mem.bytesToValue(u16, bytes[2..4])),
+            .size = @as(u32, std.mem.bytesToValue(u32, bytes[4..8])),
+            .atime = @as(u32, std.mem.bytesToValue(u32, bytes[8..12])),
+            .ctime = @as(u32, std.mem.bytesToValue(u32, bytes[12..16])),
+            .mtime = @as(u32, std.mem.bytesToValue(u32, bytes[16..20])),
+            .dtime = @as(u32, std.mem.bytesToValue(u32, bytes[20..24])),
+            .gid = @as(u16, std.mem.bytesToValue(u16, bytes[24..26])),
+            .links_count = @as(u16, std.mem.bytesToValue(u16, bytes[26..28])),
+            .blocks_count = @as(u32, std.mem.bytesToValue(u32, bytes[28..32])),
+            .flags = inode_flags.fromValue(@as(u32, std.mem.bytesToValue(u32, bytes[32..36]))),
+            .osd1 = bytes[36..40].*,
+            .blocks = [_]u32{
+                @as(u32, std.mem.bytesToValue(u32, bytes[40..44])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[44..48])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[48..52])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[52..56])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[56..60])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[60..64])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[64..68])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[68..72])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[72..76])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[76..80])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[80..84])),
+                @as(u32, std.mem.bytesToValue(u32, bytes[84..88])),
+            },
+            .indirect_blocks = @as(u32, std.mem.bytesToValue(u32, bytes[88..92])),
+            .double_indirect_blocks = @as(u32, std.mem.bytesToValue(u32, bytes[92..96])),
+            .triple_indirect_blocks = @as(u32, std.mem.bytesToValue(u32, bytes[96..100])),
+            .generation = @as(u32, std.mem.bytesToValue(u32, bytes[100..104])),
+            .file_acl = @as(u32, std.mem.bytesToValue(u32, bytes[104..108])),
+            .dir_acl = @as(u32, std.mem.bytesToValue(u32, bytes[108..112])),
+            .faddr = @as(u32, std.mem.bytesToValue(u32, bytes[112..116])),
+            .osd2 = bytes[116..128].*,
+        };
+    }
 };
 
 pub const inode_mode = struct {
@@ -331,8 +376,8 @@ pub const inode_flags = struct {
             .compressed_blocks = (value & 0x00000200) != 0,
             .no_compression = (value & 0x00000400) != 0,
             .compression_error = (value & 0x00000800) != 0,
-            .btree_format_directory = (value & 0x00001000) != 0, // same as index format
-            .index_format_directory = (value & 0x00001000) != 0, // same as btree format
+            .btree_format_directory = (value & 0x00001000) == 0,
+            .index_format_directory = (value & 0x00001000) != 0, // index is used when bit is set
             .afs_directory = (value & 0x00002000) != 0,
             .journal_file_data = (value & 0x00004000) != 0,
             .reserved_for_ext2_library = (value & 0x80000000) != 0,
@@ -354,7 +399,8 @@ pub const inode_flags = struct {
         if (self.compressed_blocks) value |= 0x00000200;
         if (self.no_compression) value |= 0x00000400;
         if (self.compression_error) value |= 0x00000800;
-        if (self.btree_format_directory || self.index_format_directory) value |= 0x00001000; // same bit
+        if (self.index_format_directory) value |= 0x00001000;
+        if (self.index_format_directory == self.btree_format_directory) @panic("index_format_directory and btree_format_directory cannot be the same");
         if (self.afs_directory) value |= 0x00002000;
         if (self.journal_file_data) value |= 0x00004000;
         if (self.reserved_for_ext2_library) value |= 0x80000000;
@@ -364,9 +410,95 @@ pub const inode_flags = struct {
 
 };
 
+pub const directory_entry = struct {
+    inode: u32, // inode number
+    rec_len: u16, // length of this record
+    name_len: u8, // length of the name
+    file_type: FileType, // type of the file
+    name_data: [256]u8, // name of the file
+
+    // TODO @(dleiferives,14e48c4e-c43f-46a7-93b7-0ab669d93437): The directory
+    // entries must be aligned on 4 bytes boundaries and there cannot be any
+    // directory entry spanning multiple data blocks. If an entry cannot
+    // completely fit in one block, it must be pushed to the next data block and
+    // the rec_len of the previous entry properly adjusted. ~#
+    pub fn fromBytes(bytes: []const u8) directory_entry {
+        if (bytes.len < 8) {
+            @panic("Directory entry bytes must be at least 8 bytes long");
+        }
+        var directory_entry_l = directory_entry{
+            .inode = 0,
+            .rec_len = 0,
+            .name_len = 0,
+            .file_type = undefined,
+            .name_data = undefined, // initialize with zeros
+        };
+        directory_entry_l.inode = @as(u32, std.mem.bytesToValue(u32, bytes[0..4]));
+        directory_entry_l.rec_len = @as(u16, std.mem.bytesToValue(u16, bytes[4..6]));
+        if (directory_entry_l.rec_len < 8) {
+            @panic("Directory entry record length must be at least 8 bytes");
+        }
+        directory_entry_l.name_len = bytes[6];
+        directory_entry_l.file_type = FileType.fromValue(bytes[7]);
+
+        @memcpy(directory_entry_l.name_data[0..directory_entry_l.name_len], bytes[8..8 + directory_entry_l.name_len]);
+        return directory_entry_l;
+    }
+    pub inline fn getName(self: *const directory_entry) []const u8 {
+        // return the name data as a slice
+        return self.name_data[0..self.name_len];
+    }
+};
+
+pub const FileType = enum(u8) {
+    unknown = 0, // unknown file type
+    regular = 1, // regular file
+    directory = 2, // directory
+    character_device = 3, // character device
+    block_device = 4, // block device
+    fifo = 5, // FIFO (named pipe)
+    socket = 6, // socket
+    symlink = 7, // symbolic link
+
+    pub inline fn fromValue(value: u8) FileType {
+        return switch (value) {
+            0 => .unknown,
+            1 => .regular,
+            2 => .directory,
+            3 => .character_device,
+            4 => .block_device,
+            5 => .fifo,
+            6 => .socket,
+            7 => .symlink,
+            else => @panic("Invalid file type value"),
+        };
+    }
+
+    pub inline fn toValue(self: FileType) u8 {
+        return switch (self) {
+            .unknown => 0,
+            .regular => 1,
+            .directory => 2,
+            .character_device => 3,
+            .block_device => 4,
+            .fifo => 5,
+            .socket => 6,
+            .symlink => 7,
+        };
+    }
+};
 
 
 
+pub const Ex2Error = error{
+    InvalidArgument,
+    InvalidFilesystem,
+    InodeNotFound,
+    InodeNotInAnyGroup,
+    NotFound,
+    OutOfMemory,
+    IoError,
+};
 
 pub const Ex2Filesystem = struct {
     dev: *block_device.BlockDev,
@@ -383,6 +515,7 @@ pub const Ex2Filesystem = struct {
     /// This is allocated with the allocator for the filesystem as a copy of the read bytes.
     superblock: superblock,
     first_data_block_addr: usize,
+    first_block_addr: usize,
 
     /// Slice of the block groups.
     /// this is computed from the superblock
@@ -404,6 +537,7 @@ pub const Ex2Filesystem = struct {
             .allocator = allocator,
             .block_groups = undefined,
             .first_data_block_addr = undefined,
+            .first_block_addr = undefined,
         };
         errdefer self.deinit();
 
@@ -432,8 +566,9 @@ pub const Ex2Filesystem = struct {
         printStruct(superblock, sb);
         if (!sb.isValid()) return false;
 
-        self.first_data_block_addr = (self.partition_entry.lba_first_absolute * self.dev.blk_size) + (self.superblock.block_size + self.superblock.first_data_block);
         self.superblock = sb;
+        self.first_data_block_addr = (self.partition_entry.lba_first_absolute * self.dev.blk_size) + (self.superblock.block_size * self.superblock.first_data_block);
+        self.first_block_addr = self.partition_entry.lba_first_absolute * self.dev.blk_size;
         return true;
     }
 
@@ -444,10 +579,48 @@ pub const Ex2Filesystem = struct {
         var block_groups_slice = try self.dev.createDataSlice(self.allocator, self.first_data_block_addr + self.superblock.block_size, @intCast(self.superblock.num_block_groups * EXT2_BLOCK_GROUP_DESC_SIZE) );
         defer block_groups_slice.free();
         self.block_groups = try self.allocator.alloc(block_group_desc, self.superblock.num_block_groups);
-        for (0..self.superblock.num_block_groups - 1 ) |i| {
+        for (0..self.superblock.num_block_groups) |i| {
             self.block_groups[i] = block_group_desc.fromBytes(block_groups_slice.data[i * 32 .. (i + 1) * 32]);
+            printStruct(block_group_desc, self.block_groups[i]);
         }
+    }
 
+    /// Gets a block from the filesystem. fills the buffer with the block data.
+    /// Returns an error if the block is out of bounds or the buffer is too small.
+    /// or if there was trouble with memory
+    pub fn getBlock(self: *Self, block:u64) !DataSlice{
+        const block_addr = self.first_block_addr + (block * self.superblock.block_size);
+
+        // std.log.info("getting block {d} at address {d}", .{block, block_addr});
+        const block_slice = try self.dev.createDataSlice(self.allocator, block_addr, self.superblock.block_size);
+        return block_slice;
+    }
+
+    pub fn getInode(self: *Self, inode_num: u64) !inode_table_entry{
+        if (inode_num == 0) return std.mem.zeroes(inode_table_entry);
+        if (inode_num > self.superblock.inodes_count) return Ex2Error.InodeNotFound;
+
+        // get the block group for the inode!
+        const block_group_num = (inode_num - 1) / self.superblock.inodes_per_group;
+        if (block_group_num > self.block_groups.len) return Ex2Error.InodeNotInAnyGroup;
+
+        const block_group = self.block_groups[block_group_num];
+        const inode_table = block_group.inode_table;
+        // std.log.info("inode table: {d}, block group: {d}, inode num: {d}", .{inode_table, block_group_num, inode_num});
+        const inode_table_idx = (inode_num - 1) % self.superblock.inodes_per_group;
+        const inodes_per_block = self.superblock.block_size / self.superblock.inode_size;
+        // std.log.info("inode table idx: {d}, inodes per block: {d}", .{inode_table_idx, inodes_per_block});
+        const inode_block = inode_table_idx / inodes_per_block;
+        const inode_block_offset = (inode_table_idx % inodes_per_block) * self.superblock.inode_size;
+        // std.log.info("inode block: {d}, inode block offset: {d}", .{inode_block, inode_block_offset});
+
+        var block_slice = try self.getBlock(inode_table + inode_block);
+        defer block_slice.free();
+
+        const inode_mem: []u8 = block_slice.data[inode_block_offset..inode_block_offset+self.superblock.inode_size];
+        var result: inode_table_entry = undefined;
+        result = inode_table_entry.fromBytes(inode_mem);
+        return result;
     }
 
     pub fn deinit(self: *Self) void {
@@ -455,10 +628,115 @@ pub const Ex2Filesystem = struct {
         self.allocator.destroy(self);
 
     }
+
+    pub fn getInodeBlockID(self: *Self, inode: inode_table_entry, block: u32) !u32 {
+        const indirect_block_size = self.superblock.block_size / @sizeOf(u32);
+        const double_indirect_block_size = indirect_block_size * indirect_block_size;
+        if(block < 12) {
+            return inode.blocks[block]; // Direct block
+        } else if (block < 12 + indirect_block_size) {
+            // Single indirect block
+            const indirect_block = inode.indirect_blocks;
+            if (indirect_block == 0) return error.NotFound; // No indirect block
+            var indirect_slice = try self.getBlock(indirect_block);
+            defer indirect_slice.free();
+            const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[(block - 12) * 4 .. (block - 12 + 1) * 4]));
+            return block_id;
+        } else if (block < 12 + indirect_block_size + double_indirect_block_size) {
+            // Double indirect block
+            const double_indirect_block = inode.double_indirect_blocks;
+            if (double_indirect_block == 0) return error.NotFound; // No double indirect block
+            var double_indirect_slice = try self.getBlock(double_indirect_block);
+            defer double_indirect_slice.free();
+            const indirect_index = (block - 12 - indirect_block_size) / indirect_block_size;
+            const indirect_block_id = @as(u32, std.mem.bytesToValue(u32, double_indirect_slice.data[indirect_index * 4 .. (indirect_index + 1) * 4]));
+            if (indirect_block_id == 0) return error.NotFound; // No indirect block
+            var indirect_slice = try self.getBlock(indirect_block_id);
+            defer indirect_slice.free();
+            const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[((block - 12 - indirect_block_size) % indirect_block_size) * 4 .. ((block - 12 - indirect_block_size) % indirect_block_size + 1) * 4]));
+            return block_id;
+        }
+
+        // Triple indirect block
+        const triple_indirect_block = inode.triple_indirect_blocks;
+        if (triple_indirect_block == 0) return error.NotFound; // No triple indirect block
+        var triple_indirect_slice = try self.getBlock(triple_indirect_block);
+        defer triple_indirect_slice.free();
+        const double_index = (block - 12 - indirect_block_size - double_indirect_block_size) / double_indirect_block_size;
+        const double_indirect_block_id = @as(u32, std.mem.bytesToValue(u32, triple_indirect_slice.data[double_index * 4 .. (double_index + 1) * 4]));
+        if (double_indirect_block_id == 0) return error.NotFound; // No double indirect block
+        var double_indirect_slice = try self.getBlock(double_indirect_block_id);
+        defer double_indirect_slice.free();
+        const indirect_index = (block - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size / indirect_block_size;
+        const indirect_block_id = @as(u32, std.mem.bytesToValue(u32, double_indirect_slice.data[indirect_index * 4 .. (indirect_index + 1) * 4]));
+        if (indirect_block_id == 0) return error.NotFound; // No indirect block
+        // Read the block from the indirect block
+        var indirect_slice = try self.getBlock(indirect_block_id);
+        defer indirect_slice.free();
+        const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[((block - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size) * 4 .. ((block - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size + 1) * 4]));
+        return block_id;
+    }
+
+    pub fn readInodeBlock(self: *Self, inode: inode_table_entry, block: u32) !DataSlice {
+        const block_id = try self.getInodeBlockID(inode, block);
+        if (block_id == 0) return error.NotFound; // No such block
+        // std.log.info("Reading inode block {d} from inode {any}", .{block_id, inode});
+        return try self.getBlock(block_id);
+    }
+
+    pub fn printDirectoryEntries(self: *Self, inode: inode_table_entry, depth: u64) !void {
+        if (!inode.mode.directory) {
+            return error.InvalidFilesystem; // Not a directory
+        }
+        if( inode.size == 0) {
+            std.log.info("Directory is empty.", .{});
+            return;
+        }
+        const num_blocks = (inode.blocks_count * 512) / self.superblock.block_size;
+        var block_index: u32 = 0;
+        const depth_buff: []const u8 = "  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||";
+        while (block_index < num_blocks) : (block_index += 1) {
+            var block_slice = try self.readInodeBlock(inode, block_index);
+            defer block_slice.free();
+            var offset: usize = 0;
+            while (offset < block_slice.data.len) {
+                const entry = directory_entry.fromBytes(block_slice.data[offset..]);
+                if (entry.rec_len == 0) break; // No more entries in this block
+                std.log.info("{s}{s}{s}", .{
+                    if (depth == 0) "" else depth_buff[0..depth*3],
+                    if (depth == 0) "" else "- ",
+                    entry.getName()
+                });
+                if(entry.file_type == FileType.directory) cont_b: {
+                    if(std.mem.eql(u8, "..",entry.getName())) break :cont_b;
+                    if(std.mem.eql(u8, ".",entry.getName())) break :cont_b;
+                    const next_inode = try self.getInode(entry.inode);
+                    // if(next_inode.flags.index_format_directory) {
+                    //     std.log.info(" index directory... not supported yet", .{});
+                    // } else {
+                        try self.printDirectoryEntries(next_inode,depth+1);
+                    // }
+                }
+                offset += @intCast(entry.rec_len);
+            }
+        }
+
+    }
+
+    pub fn printFullTree(self: *Self) !void {
+        const root_inode = try self.getInode(2); // Inode 2 is the root directory in ext2 filesystems
+        if (!root_inode.mode.directory) {
+            return error.InvalidFilesystem; // Not a directory
+        }
+        std.log.info("Root inode: {any}", .{root_inode});
+        try self.printDirectoryEntries(root_inode,0);
+    }
 };
 
+// TODO @(dleiferives,a27615e7-fd19-4a4e-aa0a-986e4838c4c3): add a iterator (with
+// seeking and such) for reading inode blocks! ~#
 
-fn printStruct(comptime T: type, value: T) void {
+pub fn printStruct(comptime T: type, value: T) void {
     const typeInfo = @typeInfo(T);
     switch (typeInfo) {
         .@"struct" => |structInfo| {
