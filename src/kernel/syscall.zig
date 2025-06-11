@@ -19,6 +19,8 @@ pub const SyscallNumber = enum(u64) {
     THREAD_JOIN = 4,
     PUTC = 5, // New
     GETC = 6, // New
+    EXEC = 7, // New
+    FORK = 8, // New
 };
 
 pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
@@ -42,6 +44,12 @@ pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
         },
         .GETC => {
             handleGetc(frame);
+        },
+        .EXEC => {
+            handleExec(frame);
+        },
+        .FORK => {
+            handleFork(frame);
         },
         .INVALID => {
             frame.rax = @intFromError(SyscallError.InvalidSyscall);
@@ -197,4 +205,32 @@ fn handleThreadJoin(frame: *arch.irq.InterruptFrame) void {
     const tid = frame.rdi;
     std.log.debug("Thread join syscall invoked for TID: {}", .{tid});
     @panic("Thread join syscall not implemented yet");
+}
+
+
+fn handleExec(frame: *arch.irq.InterruptFrame) void {
+    const path_ptr = frame.rdi;
+    const args_ptr = frame.rsi;
+    _ = args_ptr; // Currently unused, but could be used for program arguments
+
+    // Convert C strings to Zig strings (simplified)
+    const path = std.mem.span(@as([*:0]const u8, @ptrFromInt(path_ptr)));
+
+    const elf_loader = @import("elf_loader.zig");
+
+    // Replace current thread with new program
+    elf_loader.loadAndRunProgram(path, null, false) catch |err| {
+        std.log.err("Exec failed: {}", .{err});
+        frame.rax = @intFromError(err);
+        return;
+    };
+
+    // If successful, this should not return
+    frame.rax = 0;
+}
+
+fn handleFork(frame: *arch.irq.InterruptFrame) void {
+    // TODO: Implement fork() - create copy of current process
+    _ = frame;
+    @panic("fork syscall not implemented yet");
 }

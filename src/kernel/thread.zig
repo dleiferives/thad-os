@@ -262,6 +262,16 @@ pub const Thread = struct {
             );
         }
 
+pub fn exec(path: []const u8) !void {
+    return asm volatile ("int $128"
+        :
+        : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.EXEC))),
+          [path] "{rdi}" (path.ptr),
+          [args] "{rsi}" (@as(u64, 0)),
+                         : "memory", "rax", "rdi", "rsi"
+    );
+}
+
     pub fn blockOn(queue: *@import("thread_queue.zig").ThreadQueue, enable_interrupts: bool) void {
         if (getCurrentThread()) |current| {
             arch.irq.irq.disable();

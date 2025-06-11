@@ -1,5 +1,6 @@
 pub const std = @import("std");
 pub const types = @import("mem/types.zig");
+pub const tests = @import("mem/test.zig");
 pub const allocator = @import("mem/allocator.zig");
 const multiboot = @import("multiboot.zig");
 const PageBitField = @import("mem/page_bitfield.zig").PageBitField;
@@ -949,33 +950,280 @@ pub const Mapper = struct {
         invlpg(virt_addr);
     }
 
-    pub fn clone(self: *Self, allocator_l: std.mem.Allocator) !*Mapper {
-        // 1. Create a new, empty mapper for the new process
-        const new_mapper = try Mapper.create(self.pmm, self.kernel_offset, allocator_l);
+/// Creates a complete deep copy of the entire address space
+pub fn deepClone(self: *Self, allocator_l: std.mem.Allocator) !*Mapper {
+    const new_mapper = try Mapper.create(self.pmm, self.kernel_offset, allocator_l);
 
-        // 2. Get virtual pointers to the source (kernel) and destination (new) PML4 tables.
-        //    We use the scratch map to safely access these physical pages.
-        const src_pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4);
-        defer self.scratchMapDemap(self.pml4_phys_addr);
+    const src_pml4 = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4);
+    defer self.scratchMapDemap(self.pml4_phys_addr);
 
-        const dest_pml4_virt = self.scratchMapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
-        defer self.scratchMapDemap(new_mapper.pml4_phys_addr);
+    const dest_pml4 = self.scratchMapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
+    defer self.scratchMapDemap(new_mapper.pml4_phys_addr);
 
-        // 3. Copy the kernel-space mappings (typically the upper half of the table).
-        //    This is a shallow copy; we're just copying the pointers to the PDPTs.
-        //    This makes all processes share the same kernel space.
-        const kernel_space_start_index = PAGE_TABLE_ENTRY_COUNT / 2;
-        for (kernel_space_start_index..PAGE_TABLE_ENTRY_COUNT) |i| {
-            dest_pml4_virt.entries[i] = src_pml4_virt.entries[i];
+    // Deep copy all entries
+    for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
+        if (src_pml4.entries[i] & PT_PRESENT != 0) {
+            try new_mapper.deepCopyPML4Entry(src_pml4.entries[i], &dest_pml4.entries[i], i);
         }
-
-        mapper_log.info(
-            "Cloned address space. New PML4 at 0x{X} now shares kernel mappings.",
-            .{new_mapper.pml4_phys_addr},
-        );
-
-        return new_mapper;
     }
+
+    return new_mapper;
+}
+
+/// Creates a new user address space with only kernel mappings
+pub fn createUserAddressSpace(self: *Self, allocator_l: std.mem.Allocator) !*Mapper {
+    const new_mapper = try Mapper.create(self.pmm, self.kernel_offset, allocator_l);
+
+    const src_pml4 = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4);
+    defer self.scratchMapDemap(self.pml4_phys_addr);
+
+    const dest_pml4 = self.scratchMapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
+    defer self.scratchMapDemap(new_mapper.pml4_phys_addr);
+
+    // Only copy kernel space (upper half)
+    const kernel_start_index = pml4Index(self.kernel_offset);
+    for (kernel_start_index..PAGE_TABLE_ENTRY_COUNT) |i| {
+        dest_pml4.entries[i] = src_pml4.entries[i];
+    }
+
+    return new_mapper;
+}
+
+/// Copies a range of virtual memory from this mapper to another
+pub fn copyMemoryRange(
+    self: *Self,
+    dest_mapper: *Mapper,
+    src_start: u64,
+    dest_start: u64,
+    size: u64,
+    flags: PageFlags,
+) !void {
+    if (src_start & PAGE_MASK_4K != 0 or dest_start & PAGE_MASK_4K != 0 or size & PAGE_MASK_4K != 0) {
+        return MapperError.AddressNotAligned;
+    }
+
+    const page_count = size / PAGE_SIZE_4K;
+    var i: u64 = 0;
+
+    while (i < page_count) : (i += 1) {
+        const src_addr = src_start + (i * PAGE_SIZE_4K);
+        const dest_addr = dest_start + (i * PAGE_SIZE_4K);
+
+        // Check if source page exists
+        if (self.translate(src_addr)) |src_phys| {
+            // Allocate new physical page for destination
+            const dest_phys = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
+
+            // Map destination page
+            try dest_mapper.map(dest_addr, dest_phys, flags);
+
+            // Copy page contents
+            try self.copyPhysicalPage(src_phys, dest_phys);
+        }
+    }
+}
+
+/// Copies contents from one physical page to another
+fn copyPhysicalPage(self: *Self, src_phys: u64, dest_phys: u64) !void {
+    const src_virt = self.scratchMapVirt(src_phys, [PAGE_SIZE_4K]u8);
+    defer self.scratchMapDemap(src_phys);
+
+    const dest_virt = self.scratchMapVirt(dest_phys, [PAGE_SIZE_4K]u8);
+    defer self.scratchMapDemap(dest_phys);
+
+    @memcpy(dest_virt, src_virt);
+}
+
+/// Deep copies a PML4 entry and all its children
+fn deepCopyPML4Entry(self: *Self, src_entry: u64, dest_entry: *u64, pml4_index: usize) !void {
+    if (src_entry & PT_PRESENT == 0) {
+        dest_entry.* = 0;
+        return;
+    }
+
+    // Determine if this is kernel space (share) or user space (copy)
+    const is_kernel_space = pml4_index >= PAGE_TABLE_ENTRY_COUNT / 2;
+
+    if (is_kernel_space) {
+        // Share kernel space
+        dest_entry.* = src_entry;
+        return;
+    }
+
+    // User space - deep copy
+    const src_pdpt_phys = src_entry & PTE_ADDR_MASK;
+    const dest_pdpt_phys = try self.allocate_page_table_frame();
+
+    dest_entry.* = dest_pdpt_phys | (src_entry & ~PTE_ADDR_MASK);
+
+    const src_pdpt = self.scratchMapVirt(src_pdpt_phys, PageDirectoryPointerTable);
+    defer self.scratchMapDemap(src_pdpt_phys);
+
+    const dest_pdpt = self.scratchMapVirt(dest_pdpt_phys, PageDirectoryPointerTable);
+    defer self.scratchMapDemap(dest_pdpt_phys);
+
+    // Copy all PDPT entries
+    for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
+        if (src_pdpt.entries[i] & PT_PRESENT != 0) {
+            try self.deepCopyPDPTEntry(src_pdpt.entries[i], &dest_pdpt.entries[i]);
+        }
+    }
+}
+
+/// Deep copies a PDPT entry and all its children
+fn deepCopyPDPTEntry(self: *Self, src_entry: u64, dest_entry: *u64) !void {
+    if (src_entry & PT_PRESENT == 0) {
+        dest_entry.* = 0;
+        return;
+    }
+
+    // Check for 1GB pages
+    if (src_entry & PT_PAGE_SIZE != 0) {
+        @panic("1GB pages not supported in deep copy");
+    }
+
+    // Page directory
+    const src_pd_phys = src_entry & PTE_ADDR_MASK;
+    const dest_pd_phys = try self.allocate_page_table_frame();
+
+    dest_entry.* = dest_pd_phys | (src_entry & ~PTE_ADDR_MASK);
+
+    const src_pd = self.scratchMapVirt(src_pd_phys, PageDirectory);
+    defer self.scratchMapDemap(src_pd_phys);
+
+    const dest_pd = self.scratchMapVirt(dest_pd_phys, PageDirectory);
+    defer self.scratchMapDemap(dest_pd_phys);
+
+    for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
+        if (src_pd.entries[i] & PT_PRESENT != 0) {
+            try self.deepCopyPDEntry(src_pd.entries[i], &dest_pd.entries[i]);
+        }
+    }
+}
+
+/// Deep copies a PD entry and all its children
+fn deepCopyPDEntry(self: *Self, src_entry: u64, dest_entry: *u64) !void {
+    if (src_entry & PT_PRESENT == 0) {
+        dest_entry.* = 0;
+        return;
+    }
+
+    // Check for 2MB pages
+    if (src_entry & PT_PAGE_SIZE != 0) {
+        @panic("2MB pages not supported in deep copy");
+    }
+
+    // Page table
+    const src_pt_phys = src_entry & PTE_ADDR_MASK;
+    const dest_pt_phys = try self.allocate_page_table_frame();
+
+    dest_entry.* = dest_pt_phys | (src_entry & ~PTE_ADDR_MASK);
+
+    const src_pt = self.scratchMapVirt(src_pt_phys, PageTable);
+    defer self.scratchMapDemap(src_pt_phys);
+
+    const dest_pt = self.scratchMapVirt(dest_pt_phys, PageTable);
+    defer self.scratchMapDemap(dest_pt_phys);
+
+    for (0..PAGE_TABLE_ENTRY_COUNT) |i| {
+        if (src_pt.entries[i] & PT_PRESENT != 0) {
+            try self.deepCopyPTEntry(src_pt.entries[i], &dest_pt.entries[i]);
+        }
+    }
+}
+
+/// Deep copies a PT entry (actual page)
+fn deepCopyPTEntry(self: *Self, src_entry: u64, dest_entry: *u64) !void {
+    if (src_entry & PT_PRESENT == 0) {
+        dest_entry.* = 0;
+        return;
+    }
+
+    const src_phys = src_entry & PTE_ADDR_MASK;
+    const dest_phys = self.pmm.allocatePage() orelse return MapperError.OutOfMemory;
+
+    dest_entry.* = dest_phys | (src_entry & ~PTE_ADDR_MASK);
+
+    // Copy page contents
+    try self.copyPhysicalPage(src_phys, dest_phys);
+}
+
+/// Sets up copy-on-write for a memory range
+pub fn setupCopyOnWrite(
+    self: *Self,
+    dest_mapper: *Mapper,
+    start_addr: u64,
+    size: u64,
+) !void {
+    if (start_addr & PAGE_MASK_4K != 0 or size & PAGE_MASK_4K != 0) {
+        return MapperError.AddressNotAligned;
+    }
+
+    const page_count = size / PAGE_SIZE_4K;
+    var i: u64 = 0;
+
+    while (i < page_count) : (i += 1) {
+        const virt_addr = start_addr + (i * PAGE_SIZE_4K);
+
+        if (self.translate(virt_addr)) |phys_addr| {
+            // Mark both mappings as read-only for COW
+            const cow_flags = PageFlags{
+                .present = true,
+                .writable = false, // COW: mark as read-only
+                .user_accessible = true,
+                .demand_alloc = false,
+            };
+
+            // Update source mapping to read-only
+            try self.updatePageFlags(virt_addr, cow_flags);
+
+            // Map same physical page in destination
+            try dest_mapper.map(virt_addr, phys_addr, cow_flags);
+        }
+    }
+}
+
+/// Updates page flags for an existing mapping
+pub fn updatePageFlags(self: *Self, virt_addr: u64, new_flags: PageFlags) !void {
+    const pml4_idx = pml4Index(virt_addr);
+    const pdpt_idx = pdptIndex(virt_addr);
+    const pd_idx = pdIndex(virt_addr);
+    const pt_idx = ptIndex(virt_addr);
+
+    const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4);
+    defer self.scratchMapDemap(self.pml4_phys_addr);
+
+    const pml4e_val = pml4_virt.entries[pml4_idx];
+    if (pml4e_val & PT_PRESENT == 0) return MapperError.NotMapped;
+
+    const pdpt_phys_addr = pml4e_val & PTE_ADDR_MASK;
+    const pdpt_virt = self.scratchMapVirt(pdpt_phys_addr, PageDirectoryPointerTable);
+    defer self.scratchMapDemap(pdpt_phys_addr);
+
+    const pdpte_val = pdpt_virt.entries[pdpt_idx];
+    if (pdpte_val & PT_PRESENT == 0) return MapperError.NotMapped;
+    if (pdpte_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize;
+
+    const pd_phys_addr = pdpte_val & PTE_ADDR_MASK;
+    const pd_virt = self.scratchMapVirt(pd_phys_addr, PageDirectory);
+    defer self.scratchMapDemap(pd_phys_addr);
+
+    const pde_val = pd_virt.entries[pd_idx];
+    if (pde_val & PT_PRESENT == 0) return MapperError.NotMapped;
+    if (pde_val & PT_PAGE_SIZE != 0) return MapperError.UnsupportedPageSize;
+
+    const pt_phys_addr = pde_val & PTE_ADDR_MASK;
+    const pt_virt = self.scratchMapVirt(pt_phys_addr, PageTable);
+    defer self.scratchMapDemap(pt_phys_addr);
+
+    const pte_ptr = &pt_virt.entries[pt_idx];
+    if (pte_ptr.* & PT_PRESENT == 0) return MapperError.NotMapped;
+
+    const phys_addr = pte_ptr.* & PTE_ADDR_MASK;
+    pte_ptr.* = phys_addr | new_flags.to_bits();
+
+    invlpg(virt_addr);
+}
 
     pub fn mapRange(
         self: *Self,
@@ -1030,7 +1278,6 @@ pub const Mapper = struct {
 
         var i: u64 = 0;
         while (i < page_count) : (i += 1) {
-            std.log.debug("current_addr: 0x{X:0>16}, page_count: {d}", .{current_addr, page_count});
             try self.mapDemand(current_addr, page_flags);
             current_addr += PAGE_SIZE_4K;
         }
@@ -1049,7 +1296,6 @@ pub const Mapper = struct {
             mapper_log.err("mapDemand: virt_addr 0x{x} not 4K aligned.", .{virt_addr});
             return MapperError.AddressNotAligned;
         }
-        std.log.debug("virtual address is 0x{X:0>16}",.{virt_addr});
 
         const pml4_idx = pml4Index(virt_addr);
         const pdpt_idx = pdptIndex(virt_addr);
@@ -1741,4 +1987,51 @@ pub const Mapper = struct {
         const frame_4k_addr = pte_val & PTE_ADDR_MASK;
         return frame_4k_addr + page_offset;
     }
+
+    /// Deinitialize the mapper and free all user space pages and page tables
+    pub fn deinit(self: *Self) void {
+        // Free all user space memory (lower half of address space)
+        const user_space_end: u64 = types.MEMORY_LAYOUT.USER_VIRTUAL_ADDRESS_END; // 128TB, middle of address space
+
+        // Unmap all user space in chunks to avoid address space issues
+        var current_addr: u64 = 0x1000; // Start after NULL page
+        const chunk_size: u64 = 1024 * 1024 * 1024; // 1GB chunks
+
+        while (current_addr < user_space_end) {
+            const chunk_end = @min(current_addr + chunk_size, user_space_end);
+
+            // Only unmap if there are actual mappings in this range
+            if (self.hasAnyMappingsInRange(current_addr, chunk_end)) {
+                self.unmapAndFreeRangeFull(current_addr, chunk_end) catch |err| {
+                    // Log error but continue cleanup
+                    mapper_log.warn("Error during deinit unmapping range 0x{X}-0x{X}: {}", .{ current_addr, chunk_end, err });
+                };
+            }
+
+            current_addr = chunk_end;
+        }
+
+        // Free the PML4 page itself
+        self.free_page_table_frame(self.pml4_phys_addr) catch |err| {
+            mapper_log.warn("Error freeing PML4 during deinit: {}", .{err});
+        };
+    }
+
+    /// Helper function to check if there are any mappings in a range
+    fn hasAnyMappingsInRange(self: *Self, start_addr: u64, end_addr: u64) bool {
+        const start_pml4_idx = pml4Index(start_addr);
+        const end_pml4_idx = pml4Index(end_addr - 1);
+
+        const pml4_virt = self.scratchMapVirt(self.pml4_phys_addr, PageMapLevel4);
+        defer self.scratchMapDemap(self.pml4_phys_addr);
+
+        for (start_pml4_idx..(end_pml4_idx + 1)) |i| {
+            if (pml4_virt.entries[i] & PT_PRESENT != 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
 };

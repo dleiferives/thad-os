@@ -15,6 +15,7 @@ const ext2 = @import("ext2.zig");
 const vfs = @import("vfs.zig");
 const simple_fs = @import("simple_fs.zig");
 const elf = @import("elf.zig");
+const elf_loader = @import("elf_loader.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -45,7 +46,6 @@ pub export fn kmain() callconv(.C) void {
     };
 }
 
-
 /// The main function of the kernel
 /// Sets up base drivers, memory management, then initiates threading.
 pub fn main() !void {
@@ -71,7 +71,6 @@ pub fn main() !void {
     arch.irq.irq.enable();
     // Initilize the VGA driver
     state.vga_init(0xb8000);
-
 
     // Initialize the serial driver
     state.serial_log_init(drivers.serial_log.DEFAULT_BAUDRATE, .COM1);
@@ -99,7 +98,6 @@ pub fn main() !void {
     state.keyboard_manager = &kbd_manager;
     state.ps2_ctrl = &ps2_ctrl;
 
-
     if (state.options.polling_keyboard) {
         log.info("Starting keyboard input polling. Press keys to see them on screen. (Ctrl+C won't work here!)\n", .{});
         while (true) {
@@ -113,7 +111,6 @@ pub fn main() !void {
         }
     }
     try drivers.keyboard.setup_irq(&ps2_ctrl, &kbd_manager);
-
 
     // Initialize kernel heap
     try state.initKernelHeap();
@@ -178,7 +175,7 @@ pub fn main() !void {
     // // Enable interrupts
 
     // // Simple output
-    try drivers.uart.print("Hello, World!\n",.{});
+    try drivers.uart.print("Hello, World!\n", .{});
 
     if (state.testing.map_dispatch) {
         try testDemandPaging();
@@ -189,14 +186,14 @@ pub fn main() !void {
     state.scheduler = (try scheduler.RoundRobinScheduler.init(
         state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
         1000,
-)).scheduler();
+    )).scheduler();
 
     arch.irq.exceptions.initThreading();
 
-    const ctx = try state.kernel_heap.?.allocator().create(thread.ThreadContext);
-    log.info("saving context",.{});
+    const ctx = try state.getKernelAllocator().?.create(thread.ThreadContext);
+    log.info("saving context", .{});
     thread.saveContext(ctx);
-    log.info("starting to log context",.{});
+    log.info("starting to log context", .{});
     ctx.log();
 
     const main_thread = thread.Thread.create(
@@ -214,7 +211,7 @@ pub fn main() !void {
 
     try state.scheduler.?.addThread(main_thread);
 
-    if (state.testing.threading_increment){
+    if (state.testing.threading_increment) {
         var counter: u64 = 1;
         const test_thread = thread.Thread.create(
             &testKernelThread,
@@ -235,7 +232,7 @@ pub fn main() !void {
     thread.Thread.yield();
 
     // begin testing for threading
-    while(true){
+    while (true) {
         arch.cpu.halt();
     }
 }
@@ -258,8 +255,7 @@ pub fn keyboardIOThread(arg: *allowzero anyopaque) callconv(.C) i32 {
     }
 }
 
-
-fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32{
+fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32 {
     const end: *u64 = @ptrCast(@alignCast(arg));
     var i: u32 = 0;
     while (i < end.*) : (i += 1) {
@@ -280,9 +276,8 @@ fn testKernelThread(arg: *allowzero anyopaque) callconv(.C) i32{
     return -1;
 }
 
-pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
+pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
     _ = arg;
-
 
     // Create keyboard I/O test thread
     drivers.keyboard.KeyboardBuffer.setup_irq(state.ps2_ctrl.?, state.keyboard_manager.?) catch {
@@ -305,7 +300,6 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
     //     log.err("Failed to add keyboard I/O thread to scheduler: {}", .{err});
     //     @panic("Failed to add keyboard I/O thread to scheduler");
     // };
-
 
     if (state.testing.threading_snakes) {
         state.options.vga_printing = false;
@@ -331,7 +325,6 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         log.info("Scheduler changed to RunToCompletionScheduler", .{});
     }
 
-
     drivers.ata.init() catch |err| {
         log.err("Failed to initialize ATA driver: {}", .{err});
         @panic("Failed to initialize ATA driver");
@@ -349,18 +342,16 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
     //     @panic("Failed to write to ATA device");
     // };
     mbr.logAllMBR() catch |err| {
-            log.err("Failed to log MBR: {}", .{err});
-            @panic("Failed to log MBR");
-        };
+        log.err("Failed to log MBR: {}", .{err});
+        @panic("Failed to log MBR");
+    };
 
-
-
-    log.info("starting to create filesystems",.{});
-// Initialize VFS
+    log.info("starting to create filesystems", .{});
+    // Initialize VFS
     log.info("Initializing VFS", .{});
     vfs.init(state.getKernelAllocator() orelse @panic("could not get allocator for VFS"));
 
-    log.info("starting to create filesystems",.{});
+    log.info("starting to create filesystems", .{});
 
     var ext2_iter = ext2.Ext2FilesystemIterator.init(state.getKernelAllocator() orelse @panic("could not get allocator when trying to test ext2 filesystem")) catch |err| {
         log.err("Failed to initialize ext2 filesystem iterator: {}", .{err});
@@ -394,6 +385,15 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         //     @panic("Failed to print ext2 filesystem tree");
         // };
 
+
+        log.info("Testing ELF program loading...", .{});
+        elf_loader.loadAndRunProgram("/bin/program", null, false) catch |err| {
+            log.err("Failed to load ELF program: {}", .{err});
+        };
+
+        while(true) {}
+
+
         fs.deinit(); // Deinitialize the filesystem
     }
 
@@ -410,13 +410,22 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32{
         };
     }
 
+    allowed_scopes = MAP_TEST_SCOPES[0..];
+    mem.tests.runMapperTests(state.getKernelAllocator() orelse @panic("no allocator"), state.mem_manager.mapper.?) catch |err| {
+        log.err("Mapper tests failed: {}", .{err});
+        @panic("Mapper tests failed");
+    };
+    allowed_scopes = ALL_SCOPES[0..];
+
+
+
     var i: u64 = 0;
-    while(true){
-        log.debug("idle loop {}",.{i});
+    while (true) {
+        log.debug("idle loop {}", .{i});
         // check if we are the only thread
         thread.Thread.yield();
         arch.cpu.halt();
-        i+=1;
+        i += 1;
     }
 }
 
@@ -452,7 +461,8 @@ pub const Kernel = struct {
     ps2_ctrl: ?*drivers.ps2.Ps2Controller = null,
     mem_manager: *mem.Manager,
     multiboot_info: multiboot.Multiboot2Info,
-    kernel_heap: ?mem.allocator.FreeListAllocator = null,
+    kernel_heap: ?mem.allocator.TrackedAllocator = null,
+    kernel_allocator: ?mem.allocator.AllocatorWrapper = null,
     scheduler: ?scheduler.Scheduler = null,
 
     pub inline fn mem_layout_init(self: *Kernel) !void {
@@ -529,27 +539,24 @@ pub const Kernel = struct {
         const heap_start = mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_HEAP_START;
         const heap_size = 64 * 1024 * 1024; // 64MB heap
 
-        self.kernel_heap = try mem.allocator.FreeListAllocator.init(
-            heap_start,
-            heap_size,
-            mapper,
-            mem.PageFlags{
-                .present = true,
-                .writable = true,
-                .user_accessible = false,
-                .demand_alloc = false, // Not demand paging for kernel heap
-            },
+        self.kernel_heap = try mem.allocator.TrackedAllocator.init(heap_start, heap_size, mapper, mem.PageFlags{
+            .present = true,
+            .writable = true,
+            .user_accessible = false,
+            .demand_alloc = false,
+        }, self.mem_manager.internal_allocator // For tracking contexts
         );
 
-        // Test the heap
         try self.kernel_heap.?.tester();
+
+        self.kernel_allocator = try self.kernel_heap.?.createAllocator();
 
         log.info("Kernel heap initialized", .{});
     }
 
     pub fn getKernelAllocator(self: *Kernel) ?std.mem.Allocator {
-        if (self.kernel_heap) |*heap| {
-            return heap.allocator();
+        if(self.kernel_allocator) |*alloc|{
+            return alloc.allocator();
         }
         return null;
     }
@@ -584,7 +591,7 @@ pub fn print(comptime format: []const u8, args: anytype) void {
     // Print logging protect via disabling interrupts
     // arch.cpu.cli();
     if (drivers.vga.initialized) {
-        if(state.options.vga_printing) {
+        if (state.options.vga_printing) {
             // Print to VGA
             drivers.vga.print(format, args) catch {};
         }
@@ -622,6 +629,7 @@ pub const LogScope = enum {
     mem_manager_mapper,
     mem_manager_mapper_verbose,
     mem_manager_mapper_translate,
+    mapper_tests,
     mem_allocator,
     mem_allocator_verbose,
     mem_page_bitfield,
@@ -632,14 +640,17 @@ pub const LogScope = enum {
     std_log_default_scope,
     simple_fs,
     kernel_vfs,
+    elf_loader,
 };
 
 pub var allowed_scopes: ?[]const LogScope = null;
 pub const ALL_SCOPES = [_]LogScope{
-    .simple_fs,
-    .kernel_vfs,
-    .mem_page_bitfield_verbose,
-    .mem_page_bitfield,
+    .mapper_tests,
+    .elf_loader,
+    // .simple_fs,
+    // .kernel_vfs,
+    // .mem_page_bitfield_verbose,
+    // .mem_page_bitfield,
     .mem,
     // .mem_verbose,
     .mem_layout,
@@ -653,20 +664,39 @@ pub const ALL_SCOPES = [_]LogScope{
     .irq,
     // .thread_yield,
     .irq_page_fault,
-    .drivers_vga,
-    .drivers_serial_log,
-    .drivers_ps2,
-    .drivers_ps2_verbose,
-    .drivers_keyboard,
+    // .drivers_vga,
+    // .drivers_serial_log,
+    // .drivers_ps2,
+    // .drivers_ps2_verbose,
+    // .drivers_keyboard,
     // .drivers_ata,
     // .drivers_ata_verbose,
     // .drivers_keyboard_verbose,
-    .drivers_uart_verbose,
-    .drivers_uart,
+    // .drivers_uart_verbose,
+    // .drivers_uart,
     .kernel,
     .kernel_mbr,
     // .kernel_thread,
-    .arch_gdt,
+    // .arch_gdt,
+    .kernel_main,
+    .std_log_default_scope,
+};
+
+pub const MAP_TEST_SCOPES = [_]LogScope{
+    .mapper_tests,
+    .mem_page_bitfield_verbose,
+    .mem_page_bitfield,
+    .mem,
+    .mem_verbose,
+    .mem_layout,
+    .mem_manager,
+    .mem_manager_verbose,
+    .mem_manager_mapper,
+    .mem_manager_mapper_verbose,
+    .irq,
+    .irq_page_fault,
+    .kernel,
+    .kernel_mbr,
     .kernel_main,
     .std_log_default_scope,
 };
@@ -808,7 +838,6 @@ pub fn testDemandPaging() !void {
     log.info("Demand paging test completed successfully!", .{});
 }
 
-
 // Add VFS test function
 fn testVfsOperations() !void {
     log.info("=== Testing VFS Operations ===", .{});
@@ -934,7 +963,6 @@ fn testVfsOperations() !void {
 
     log.info("=== VFS Tests Complete ===", .{});
 }
-
 
 pub fn kputc(ch: u8) void {
     // arch.cpu.cli(); // Ensure atomic character output
