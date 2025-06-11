@@ -1,3 +1,4 @@
+// For my next os setup nice elf stuff
 const std = @import("std");
 const multiboot = @import("multiboot.zig");
 const types = @import("mem/types.zig");
@@ -208,25 +209,25 @@ pub const elf = struct {
         }
     };
 
-    /// Symbol Binding Attributes (for st_info)
+    /// Symbol Binding Attributes
     pub const STB = struct {
         pub const LOCAL = 0;
         pub const GLOBAL = 1;
         pub const WEAK = 2;
     };
 
-    /// Symbol Types (for st_info)
+    /// Symbol Types
     pub const STT = struct {
-        pub const NOTYPE = 0; // Symbol type is unspecified
+        pub const NOTYPE = 0;
         pub const OBJECT = 1;
         pub const FUNC = 2;
         pub const SECTION = 3;
-        pub const FILE = 4; // Symbol's name is file name
-        pub const COMMON = 5; // Symbol is a common block
-        pub const TLS = 6; // Symbol is thread-local storage
+        pub const FILE = 4;
+        pub const COMMON = 5;
+        pub const TLS = 6;
     };
 
-    /// Special Section Indices (for st_shndx)
+    /// Special Section Indices
     pub const SHN = struct {
         pub const UNDEF = 0;
         pub const LOPROC = 0xFF00;
@@ -240,7 +241,7 @@ pub const elf = struct {
 
     /// 32-bit Symbol Table Entry
     pub const Elf32_Sym = extern struct {
-        st_name: u32, // Symbol name (index into string table)
+        st_name: u32,
         st_value: u32,
         st_size: u32,
         st_info: u8,
@@ -250,7 +251,7 @@ pub const elf = struct {
 
     /// 64-bit Symbol Table Entry
     pub const Elf64_Sym = extern struct {
-        st_name: u32, // Symbol name (index into string table)
+        st_name: u32,
         st_info: u8,
         st_other: u8,
         st_shndx: u16,
@@ -269,7 +270,6 @@ pub const elf = struct {
         return (bind << 4) + (type_ & 0x0F);
     }
 
-    // Helper for st_other (visibility)
     pub const STV = struct {
         pub const DEFAULT = 0;
         pub const INTERNAL = 1;
@@ -281,7 +281,6 @@ pub const elf = struct {
     }
 };
 
-/// An ELF file parser, focused on loading executables.
 pub const ElfFile = struct {
     bytes: []const u8,
     header: *const elf.Elf64_Ehdr,
@@ -294,7 +293,6 @@ pub const ElfFile = struct {
         InvalidHeader,
     };
 
-    /// Parses a byte slice into a validated ELF file structure.
     pub fn parse(file_bytes: []const u8) ElfParseError!ElfFile {
         if (file_bytes.len < @sizeOf(elf.Elf64_Ehdr)) {
             return ElfParseError.InvalidHeader;
@@ -302,7 +300,6 @@ pub const ElfFile = struct {
 
         const header: *const elf.Elf64_Ehdr = @ptrCast(@alignCast(file_bytes.ptr));
 
-        // Validate the ELF header
         if (header.e_ident[elf.EI.MAG0] != 0x7F or
             header.e_ident[elf.EI.MAG1] != 'E' or
             header.e_ident[elf.EI.MAG2] != 'L' or
@@ -329,12 +326,11 @@ pub const ElfFile = struct {
         };
     }
 
-    /// Returns the executable's entry point address.
     pub fn getEntryPoint(self: ElfFile) u64 {
         return self.header.e_entry;
     }
 
-    /// Returns an iterator over the program headers.
+    // Gets an iterator for the program headers of this file
     pub fn getProgramHeaders(self: ElfFile) ProgramHeaderIterator {
         return ProgramHeaderIterator.init(self.bytes, self.header);
     }
@@ -374,14 +370,12 @@ pub const ProgramHeaderIterator = struct {
     }
 };
 
-/// ELF section header iterator
 pub const ElfSectionIterator = struct {
     tag: *const ElfSymbolsTag,
     current_index: usize = 0,
     is_64bit: bool,
     string_table_data: ?[]const u8 = null,
 
-    /// Create a new section iterator from an ELF symbols tag
     pub fn init(tag: *const ElfSymbolsTag, is_64bit: bool) ElfSectionIterator {
         return .{
             .tag = tag,
@@ -389,7 +383,6 @@ pub const ElfSectionIterator = struct {
         };
     }
 
-    /// Set the string table data for section name resolution
     pub fn setStringTable(
         self: *ElfSectionIterator,
         string_table: []const u8,
@@ -397,7 +390,6 @@ pub const ElfSectionIterator = struct {
         self.string_table_data = string_table;
     }
 
-    /// Get the next section header
     pub fn next(self: *ElfSectionIterator) ?ElfSection {
         if (self.current_index >= self.tag.num) {
             return null;
@@ -472,7 +464,6 @@ pub const ElfSectionIterator = struct {
     }
 };
 
-/// Represents a *single* ELF section
 pub const ElfSection = struct {
     header32: elf.Elf32_Shdr,
     header64: elf.Elf64_Shdr,
@@ -480,7 +471,6 @@ pub const ElfSection = struct {
     name: ?[]const u8,
     string_table: ?[]const u8,
 
-    /// Get section name if string table is available
     pub fn getName(self: ElfSection) ?[]const u8 {
         const string_table = self.string_table orelse return null;
         const name_offset = if (self.is_64bit)
@@ -497,7 +487,6 @@ pub const ElfSection = struct {
         return string_table[name_offset..i];
     }
 
-    /// Get section type as a string
     pub fn getTypeString(self: ElfSection) []const u8 {
         const sh_type = if (self.is_64bit)
             self.header64.sh_type
@@ -520,7 +509,6 @@ pub const ElfSection = struct {
         };
     }
 
-    /// Get section data pointer
     pub fn getDataPtr(self: ElfSection) [*]const u8 {
         const offset = if (self.is_64bit)
             self.header64.sh_offset
@@ -529,7 +517,6 @@ pub const ElfSection = struct {
         return @ptrFromInt(offset);
     }
 
-    /// Get section data slice if available
     pub fn getData(self: ElfSection) ?[]const u8 {
         const offset = if (self.is_64bit)
             self.header64.sh_offset
@@ -545,7 +532,6 @@ pub const ElfSection = struct {
         return @as([*]const u8, @ptrFromInt(offset))[0..@intCast(size)];
     }
 
-    /// Get section flags as a string
     pub fn getFlagsString(self: ElfSection, buffer: []u8) []const u8 {
         const flags = if (self.is_64bit)
             self.header64.sh_flags
@@ -591,13 +577,10 @@ pub const ElfSection = struct {
     }
 };
 
-/// Usage example
 pub fn parseElfSections(tag: *const ElfSymbolsTag, is_64bit: bool) void {
-    // Create the iterator
     var section_iterator = ElfSectionIterator.init(tag, is_64bit);
     var string_data: []const u8 = undefined;
 
-    // First, find the string table to resolve section names
     if (section_iterator.findStringTableSection()) |string_section| {
         if (string_section.getData()) |string_table| {
             section_iterator.setStringTable(string_table);
@@ -605,7 +588,6 @@ pub fn parseElfSections(tag: *const ElfSymbolsTag, is_64bit: bool) void {
         }
     }
 
-    // Reset and iterate through all sections
     section_iterator.current_index = 0;
 
     std.log.debug("Section Headers (total: {}):\n", .{tag.num});

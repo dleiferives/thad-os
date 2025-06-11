@@ -2,11 +2,6 @@ const std = @import("std");
 const irq = @import("arch").irq; // Your interrupt system
 const arch = @import("arch");
 
-
-// ============================================================================
-// Core Types and Configuration
-// ============================================================================
-
 pub const UartError = error{ NotInitialized, BufferFull, BufferEmpty, Timeout };
 
 pub const Port = enum(u16) {
@@ -41,14 +36,10 @@ pub const Config = struct {
     enable_interrupts: bool = true,
 };
 
-// ============================================================================
-// Register Definitions (Simplified)
-// ============================================================================
-
 const Reg = enum(u8) {
-    DATA = 0,    // RBR/THR/DLL
-    IER = 1,     // IER/DLM
-    FCR = 2,     // IIR/FCR
+    DATA = 0,    // Data Register
+    IER = 1,     // Interrupt Enable Register
+    FCR = 2,     // FIFO Control Register
     LCR = 3,     // Line Control
     MCR = 4,     // Modem Control
     LSR = 5,     // Line Status
@@ -87,14 +78,12 @@ const MCR = struct {
     const OUT2 = 0x08; // Required for interrupts
 };
 
-// ============================================================================
-// UART Driver
-// ============================================================================
-
-const BUFFER_SIZE = 256;
-const BUFFER_MASK = BUFFER_SIZE - 1;
 
 pub const Uart = struct {
+
+    const BUFFER_SIZE = 256;
+    const BUFFER_MASK = BUFFER_SIZE - 1;
+
     base_port: u16,
     irq_num: u8,
     initialized: bool = false,
@@ -114,10 +103,10 @@ pub const Uart = struct {
         self.base_port = @intFromEnum(config.port);
         self.irq_num = config.port.irqNumber();
 
-        // Disable interrupts
+        // disable interrupts
         self.writeReg(.IER, 0);
 
-        // Set baud rate
+        // set baud rate
         const div = config.baud_rate.divisor();
         self.writeReg(.LCR, LCR.DLAB);
         self.writeReg(.DATA, @truncate(div));
@@ -126,17 +115,17 @@ pub const Uart = struct {
         // 8N1, no break, no DLAB
         self.writeReg(.LCR, LCR.DATA_8_BITS | LCR.STOP_1_BIT | LCR.NO_PARITY);
 
-        // Enable FIFO, clear buffers
+        // enable FIFO, clear buffers
         self.writeReg(.FCR, FCR.ENABLE | FCR.CLEAR_RX | FCR.CLEAR_TX | FCR.TRIGGER_14);
 
-        // Enable DTR, RTS, OUT2
+        // enable DTR, RTS, OUT2
         self.writeReg(.MCR, MCR.DTR | MCR.RTS | MCR.OUT2);
 
         // Clear any pending data
         _ = self.readReg(.LSR);
         _ = self.readReg(.DATA);
 
-        // Reset buffers
+        // reset buffers
         self.tx_head = 0;
         self.tx_tail = 0;
         self.tx_busy = false;
@@ -144,7 +133,6 @@ pub const Uart = struct {
         self.rx_tail = 0;
 
         if (config.enable_interrupts) {
-            // Register interrupt handler
             try irq.irq.registerIrq(self.irq_num, uartHandler);
 
             // Enable RX and line status interrupts
@@ -227,23 +215,16 @@ pub const Uart = struct {
         return if (timeout == 0) UartError.Timeout else {};
     }
 
-    // Private methods
     fn writeReg(self: *const Uart, reg: Reg, value: u8) void {
         irq.irq.disable();
         const port = self.base_port + @intFromEnum(reg);
-        asm volatile ("outb %[value], %[port]"
-            :
-            : [value] "{al}" (value), [port] "N{dx}" (port)
-        );
+        arch.outb(port, value);
         irq.irq.enable();
     }
 
     fn readReg(self: *const Uart, reg: Reg) u8 {
         const port = self.base_port + @intFromEnum(reg);
-        return asm volatile ("inb %[port], %[result]"
-            : [result] "={al}" (-> u8)
-            : [port] "N{dx}" (port)
-        );
+        return arch.inb(port);
     }
 
     fn txEmpty(self: *const Uart) bool {
@@ -320,16 +301,11 @@ pub const Uart = struct {
     }
 };
 
-// ============================================================================
-// Global Interface
-// ============================================================================
-
 var com1: Uart = .{
     .base_port = @intFromEnum(Port.COM1),
     .irq_num = Port.COM1.irqNumber(),
 };
 
-// Interrupt handler
 fn uartHandler(frame: *irq.InterruptFrame) void {
     _ = frame;
     com1.handleInterrupt();
@@ -372,10 +348,6 @@ pub fn flush() UartError!void {
     return com1.flush();
 }
 
-// ============================================================================
-// std.io compatible interface
-// ============================================================================
-
 pub const Writer = struct {
     pub const Error = UartError;
 
@@ -406,41 +378,4 @@ pub fn writer() Writer {
 
 pub fn reader() Reader {
     return .{};
-}
-
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-pub fn readLine(buffer: []u8) UartError![]u8 {
-    var count: usize = 0;
-
-    while (count < buffer.len - 1) {
-        // Wait for data
-        while (!rxReady()) {
-            asm volatile ("pause");
-        }
-
-        const byte = try readByte();
-
-        // Echo back
-        _ = try write(&[_]u8{byte});
-
-        if (byte == '\r' or byte == '\n') {
-            _ = try write(&[_]u8{'\n'});
-            buffer[count] = '\n';
-            count += 1;
-            break;
-        } else if (byte == 8 or byte == 127) { // Backspace
-            if (count > 0) {
-                _ = try write(&[_]u8{ 8, ' ', 8 });
-                count -= 1;
-            }
-        } else {
-            buffer[count] = byte;
-            count += 1;
-        }
-    }
-
-    return buffer[0..count];
 }

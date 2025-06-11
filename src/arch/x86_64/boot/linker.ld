@@ -1,5 +1,4 @@
 ENTRY(_entry)
-
 GRUB_GAP = 0x100000;
 KERNEL_OFFSET = 0xFFFFFF8000000000;
 KERNEL_VIRTUAL_ADDRESS_START = KERNEL_OFFSET | GRUB_GAP;
@@ -12,7 +11,7 @@ SECTIONS
 
     .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_OFFSET)
     {
-        *(.multiboot)   /* Put multiboot header first */
+        *(.multiboot)
         *(.text)
     }
 

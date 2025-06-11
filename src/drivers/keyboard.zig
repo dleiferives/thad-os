@@ -13,61 +13,35 @@ const Mutex = kernel.mutex.Mutex;
 const ThreadQueue = kernel.thread_queue.ThreadQueue;
 const thread = kernel.thread;
 
+
+const arch = @import("arch");
+var ps2_ctrl : *Ps2Controller  = undefined;
+var kbd_mgr  : *KeyboardManager = undefined;
+
+
 // Based on common Scan Code Set 2 values.
 // TODO @(dleiferives,794619e9-698f-40b4-8108-2bad486f7e48): add all of the
 // scancodes and their parsing ~#
 const Key = enum {
     Unknown,
     Escape,
-    N1,
-    N2,
-    N3,
-    N4,
-    N5,
-    N6,
-    N7,
-    N8,
-    N9,
-    N0,
+    N1, N2, N3, N4, N5, N6, N7, N8, N9, N0,
     Minus,
     Equals,
     Backspace,
     Tab,
-    Q,
-    W,
-    E,
-    R,
-    T,
-    Y,
-    U,
-    I,
-    O,
-    P,
+    Q, W, E, R, T, Y, U, I, O, P,
     LeftBracket,
     RightBracket,
     Enter,
     LeftCtrl,
-    A,
-    S,
-    D,
-    F,
-    G,
-    H,
-    J,
-    K,
-    L,
+    A, S, D, F, G, H, J, K, L,
     Semicolon,
     Apostrophe,
     Grave, // Backtick `
     LeftShift,
     Backslash,
-    Z,
-    X,
-    C,
-    V,
-    B,
-    N,
-    M,
+    Z, X, C, V, B, N, M,
     Comma,
     Period,
     Slash,
@@ -76,16 +50,7 @@ const Key = enum {
     LeftAlt,
     Space,
     CapsLock,
-    F1,
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
-    F9,
-    F10,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10,
     NumLock,
     ScrollLock,
 
@@ -104,14 +69,12 @@ const Key = enum {
     KeypadPeriod,
     KeypadSlash,
     KeypadEnter,
-    F11,
-    F12,
+    F11, F12,
 
-    // E0 prefixed keys
     E0_KeypadEnter,
     E0_RightCtrl,
     E0_KeypadSlash,
-    E0_PrintScreen, // Complex sequence
+    E0_PrintScreen,
     E0_RightAlt,
     E0_Home,
     E0_ArrowUp,
@@ -123,17 +86,16 @@ const Key = enum {
     E0_PageDown,
     E0_Insert,
     E0_Delete,
-    E0_LeftGui, // Windows key
-    E0_RightGui,
+    E0_LeftSuper,
+    E0_RightSuper,
     E0_Apps, // Menu key
     E0_Power,
     E0_Sleep,
     E0_Wake,
 
-    // Pause/Break is a very special sequence: E1, 1D, 45, E1, 9D, C5
+    // Pause/Break is: E1, 1D, 45, E1, 9D, C5
     PauseBreak,
 
-    // Key Release...
     KeyRelease, // I really don't know how to handle this yet... i'm just going to ignore it
 
     pub fn toChar(key: Key, shift: bool, caps_lock: bool) ?u8 {
@@ -182,7 +144,6 @@ const Key = enum {
                 .Semicolon => ':', .Apostrophe => '"', .LeftBracket => '{',
                 .RightBracket => '}', .Backslash => '|', .Minus => '_',
                 .Equals => '+', .Grave => '~',
-                // Keypad typically doesn't change with shift for numbers, but NumLock matters
                 .Keypad0 => '0', .Keypad1 => '1', .Keypad2 => '2', .Keypad3 => '3',
                 .Keypad4 => '4', .Keypad5 => '5', .Keypad6 => '6', .Keypad7 => '7',
                 .Keypad8 => '8', .Keypad9 => '9',
@@ -289,44 +250,38 @@ fn scancodeSet2ToKey(sc: u8, e0_prefix: bool) Key {
             0x5B => .RightBracket,
             0x5D => .Backslash,
             0x66 => .Backspace,
-            0x69 => .Keypad1, // End (if NumLock off)
-            0x6A => .Keypad4, // Left (if NumLock off)
-            0x6B => .Keypad7, // Home (if NumLock off)
-            0x6C => .Keypad0, // Ins (if NumLock off)
-            0x6D => .KeypadPeriod, // Del (if NumLock off)
-            0x6E => .Keypad2, // Down (if NumLock off)
+            0x69 => .Keypad1, // End !NumLock
+            0x6A => .Keypad4, // Left !NumLock
+            0x6B => .Keypad7, // Home !NumLock
+            0x6C => .Keypad0, // Ins !NumLock
+            0x6D => .KeypadPeriod, // Del !NumLock
+            0x6E => .Keypad2, // Down !NumLock
             0x6F => .Keypad5,
-            0x70 => .Keypad6, // Right (if NumLock off)
-            0x71 => .Keypad8, // Up (if NumLock off)
+            0x70 => .Keypad6, // Right !NumLock
+            0x71 => .Keypad8, // Up !NumLock
             0x72 => .Escape,
             0x73 => .NumLock,
             0x74 => .F11,
             0x75 => .KeypadPlus,
-            0x76 => .F7, // Often Scroll Lock on older keyboards, but F7 is common for Set 2
-            0x77 => .Keypad3, // PageDown (if NumLock off)
+            0x76 => .F7,
+            0x77 => .Keypad3, // PageDown !NumLock
             0x78 => .KeypadMinus,
             0x79 => .KeypadAsterisk,
-            0x7A => .Keypad9, // PageUp (if NumLock off)
-            0x7B => .ScrollLock, // Sometimes F7, check keyboard model
-            0x7E => .KeypadEnter, // This is usually E0 1C
-            0xDF => .KeyRelease, // Break code prefix (0xF0)
+            0x7A => .Keypad9, // PageUp !NumLock
+            0x7B => .ScrollLock,
+            0x7E => .KeypadEnter,
+            0xDF => .KeyRelease,
             else => .Unknown,
         };
     }
 }
 
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// Keyboard Event
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 pub const KeyEvent = struct {
     key: Key,
-    char: ?u8, // The character representation, if any
+    char: ?u8,
     pressed: bool, // True for make, false for break
 };
 
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// PS/2 Keyboard Device
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 pub const Ps2KeyboardDevice = struct {
     port_index: u1,
     controller: *Ps2Controller,
@@ -335,8 +290,6 @@ pub const Ps2KeyboardDevice = struct {
     // State for scan code processing
     e0_prefix: bool = false,
     f0_prefix: bool = false, // For break codes (0xF0, <make_code>)
-    // Pause/Break sequence state (complex, simplified for now)
-    // e1_pause_state: u8 = 0,
 
     // Modifier and lock states
     left_shift_pressed: bool = false,
@@ -345,7 +298,8 @@ pub const Ps2KeyboardDevice = struct {
     right_ctrl_pressed: bool = false,
     left_alt_pressed: bool = false,
     right_alt_pressed: bool = false,
-    // GUI keys, etc. could be added
+    left_super_pressed: bool = false,
+    right_super_pressed: bool = false,
 
     caps_lock_on: bool = false,
     num_lock_on: bool = false,
@@ -365,29 +319,25 @@ pub const Ps2KeyboardDevice = struct {
         };
     }
 
-    // Process a raw scancode byte received from the PS/2 controller
+    /// Proccesses a raw scancode from the keyboard.
     pub fn processScancode(self: *Self, scancode: u8) ?KeyEvent {
         var event: ?KeyEvent = null;
 
-        // Handle Pause/Break sequence (simplified: assumes E1 is the start)
-        // A full implementation needs to track the E1, 1D, 45, E1, 9D, C5 sequence.
+        // Handle pause break...
         if (scancode == 0xE1) {
-            // self.e1_pause_state = 1;
-            // For now, just consume E1 and wait for next parts.
-            // A real driver would buffer these.
+            // I'm not going to do that!
             log_verbose.info(" (Pause/Break E1 prefix) ", .{});
             return null;
         }
-        // if (self.e1_pause_state > 0) { ... handle rest of Pause/Break ... }
 
         if (scancode == 0xE0) {
             self.e0_prefix = true;
             return null; // Wait for next byte
         }
 
-        if (scancode == 0xF0) { // Break code prefix
+        if (scancode == 0xF0) {
             self.f0_prefix = true;
-            return null; // Wait for next byte (the make code of the key being released)
+            return null;
         }
 
         const key_pressed = !self.f0_prefix;
@@ -404,22 +354,24 @@ pub const Ps2KeyboardDevice = struct {
                 .E0_RightCtrl => self.right_ctrl_pressed = key_pressed,
                 .LeftAlt => self.left_alt_pressed = key_pressed,
                 .E0_RightAlt => self.right_alt_pressed = key_pressed,
+                .E0_LeftGui => self.left_super_pressed = key_pressed,
+                .E0_RightGui => self.right_super_pressed = key_pressed,
                 .CapsLock => if (key_pressed) {
                     self.caps_lock_on = !self.caps_lock_on;
                     self.updateLeds() catch |err| {
-                        log_verbose.info("Error updating LEDs for CapsLock: {s}\n", .{@errorName(err)});
+                        log_verbose.err("Error updating LEDs for CapsLock: {s}\n", .{@errorName(err)});
                     };
                 },
                 .NumLock => if (key_pressed) {
                     self.num_lock_on = !self.num_lock_on;
                     self.updateLeds() catch |err| {
-                        log_verbose.info("Error updating LEDs for NumLock: {s}\n", .{@errorName(err)});
+                        log_verbose.err("Error updating LEDs for NumLock: {s}\n", .{@errorName(err)});
                     };
                 },
                 .ScrollLock => if (key_pressed) {
                     self.scroll_lock_on = !self.scroll_lock_on;
                     self.updateLeds() catch |err| {
-                        log_verbose.info("Error updating LEDs for ScrollLock: {s}\n", .{@errorName(err)});
+                        log_verbose.err("Error updating LEDs for ScrollLock: {s}\n", .{@errorName(err)});
                     };
                 },
                 else => {},
@@ -427,8 +379,8 @@ pub const Ps2KeyboardDevice = struct {
 
             if (key_pressed) {
                 const shift_active = self.left_shift_pressed or self.right_shift_pressed;
-                // NumLock affects keypad keys for characters vs navigation
-                // This simplified toChar doesn't fully handle NumLock for keypad yet.
+                // TODO @(dleiferives,8a3af962-9101-4225-96bd-8cb725d0ea3c): add
+                // numlock stuff.... ~#
                 char_val = Key.toChar(current_key, shift_active, self.caps_lock_on);
             }
 
@@ -441,11 +393,9 @@ pub const Ps2KeyboardDevice = struct {
             log_verbose.info("Unknown scancode sequence: e0={any}, f0={any}, sc={x}\n", .{ self.e0_prefix, self.f0_prefix, scancode });
         }
 
-        // Reset prefixes for next scancode
+        // Reset for next scancode
         self.e0_prefix = false;
         self.f0_prefix = false;
-        // self.e1_pause_state = 0; // Reset if sequence broken or completed
-
         return event;
     }
 
@@ -456,8 +406,7 @@ pub const Ps2KeyboardDevice = struct {
         const response = try self.controller.readDataPortWithTimeout(ack_timeout_iter);
         if (response == ps2.DEV_RES_RESEND) {
             log_verbose.info("Keyboard requested resend for command {x}\n", .{command});
-            // Retry try vga.driver.printic could be added here
-            return Ps2Error.CommandFailed; // Simplified
+            return Ps2Error.CommandFailed;
         }
         if (response != ps2.DEV_RES_ACK) {
             log_verbose.info("Keyboard NACKed command {x}, response: {x}\n", .{ command, response });
@@ -469,7 +418,7 @@ pub const Ps2KeyboardDevice = struct {
         log_verbose.info("Updating LEDs: Caps={}, Num={}, Scroll={}\n", .{
             self.caps_lock_on, self.num_lock_on, self.scroll_lock_on,
         });
-        try self.sendKeyboardCommand(0xED); // Set LEDs command
+        try self.sendKeyboardCommand(0xED);
 
         var led_byte: u8 = 0;
         if (self.scroll_lock_on) led_byte |= (1 << 0);
@@ -479,16 +428,8 @@ pub const Ps2KeyboardDevice = struct {
         try self.sendKeyboardCommand(led_byte);
         log_verbose.info("LEDs updated.\n", .{});
     }
-
-    // Other potential methods:
-    // - setTypematicRateDelay(rate: u8, delay: u8) !void
-    // - enableScanning() !void
-    // - disableScanning() !void
 };
 
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-// Keyboard Manager
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 pub const KeyboardManager = struct {
     controller: *Ps2Controller,
     keyboard1: ?Ps2KeyboardDevice = null,
@@ -504,15 +445,10 @@ pub const KeyboardManager = struct {
         // Check Port 1 for a keyboard
         if (ps2_controller.port1_operational) {
             if (ps2_controller.port1_device_id) |id| {
-                // These are common keyboard types. Add more as needed.
                 switch (id.device_type) {
                     .Mf2Keyboard, .Mf2KeyboardType2, .ShortKeyboard, .NcdN97Keyboard, .Keyboard122Key => {
                         log_verbose.info("KeyboardManager: Found '{s}' on Port 1.\n", .{@tagName(id.device_type)});
                         manager.keyboard1 = Ps2KeyboardDevice.init(0, ps2_controller, id.device_type);
-                        // Initialize LEDs to current state (usually all off at boot by device)
-                        // Or query current LED state if possible (not standard)
-                        // For now, assume off and let toggles set them.
-                        // Or try to set them to a known state:
                         manager.keyboard1.?.updateLeds() catch |e| {
                            log_verbose.info("Initial LED update for KBD1 failed: {s}\n", .{@errorName(e)});
                         };
@@ -553,17 +489,12 @@ pub const KeyboardManager = struct {
         return manager;
     }
 
-    /// Polls for keyboard input from available keyboards.
-    /// This function is designed to be called repeatedly in a loop.
     pub fn pollAndProcessInput(self: *Self) void {
-        // Check controller status to see if data is available
         const status = self.controller.status_port.read();
 
         if ((status & ps2.STATUS_OUTPUT_BUFFER_FULL) != 0) {
             log_verbose.info("PS/2 Controller: Data available in output buffer.\n", .{});
-            // Data is available. Determine which port it's from.
-            // This is the tricky part with polling dual channel.
-            // The Controller Output Port (COP) can help.
+            // Data is available. Let's find out which port it came from
             var scancode: u8 = 0;
             var port_source: ?u1 = null;
 
@@ -571,28 +502,19 @@ pub const KeyboardManager = struct {
             scancode = self.controller.data_port.read();
             log_verbose.info("PS/2 Controller: Read scancode {x} from output buffer.\n", .{scancode});
 
-            // Try to determine source using Controller Output Port
-            // This is still racy, but better than nothing for polling.
-            // IRQs are the proper way.
+            // There are almost certainly race conditions here, but...
+            // I'm just going to be using the irq so I'm not pressed
             if (self.controller.is_dual_channel_supported) {
-                const cop = self.controller.readControllerOutputPort() catch 0; // Default to 0 on error
+                const cop = self.controller.readControllerOutputPort() catch 0;
                 if ((cop & ps2.COP_OUTPUT_BUFFER_FULL_PORT2) != 0) {
-                    // Data seems to be from port 2 (IRQ12 source)
-                    // However, the byte we read might have been from port 1 if it arrived
-                    // between our status check and COP read.
-                    // The OSDev wiki says: "bit 5 ... Output buffer full with byte from second PS/2 port"
-                    // This implies if bit 5 is set, the current byte in 0x60 is from port 2.
                     port_source = 1;
                 } else if ((cop & ps2.COP_OUTPUT_BUFFER_FULL_PORT1) != 0) {
-                    // Data seems to be from port 1 (IRQ1 source)
                     port_source = 0;
                 } else {
-                    // If neither specific bit is set, but OBF was, it's usually port 1.
-                    // Or it could be a controller response not tied to a port.
-                    // For keyboard data, assume port 1 if not specified by COP.
                     if (self.keyboard1 != null) port_source = 0;
                 }
-            } else { // Single channel controller
+            } else {
+                // single channel controller
                 if (self.keyboard1 != null) port_source = 0;
             }
 
@@ -618,32 +540,26 @@ pub const KeyboardManager = struct {
                                 log.warn("{c}", .{char_to_print});
                             }
                             if (key_event.key == .Backspace) {
-                                log.warn("\x08 \x08", .{}); // Backspace, space, backspace to erase
+                                log.warn("\x08 \x08", .{}); // Classic send backspace then space then backspace
                             }
                         }
                     }
                 }
             } else {
-                // Data in buffer, but couldn't determine source or no keyboard for it
-                // This could also be a mouse packet if a mouse is on the other port.
+                // could be the mouse?? if there is a mouse
                 log_verbose.info("PS/2 data {x} received, but no keyboard handler or unknown source.\n", .{scancode});
             }
         }
     }
 };
 
-
-
-const arch = @import("arch");
-var ps2_ctrl : *Ps2Controller  = undefined;
-var kbd_mgr  : *KeyboardManager = undefined;
-
 /// IRQ-1 (keyboard) handler.
 fn irq1Handler(frame: *arch.irq.InterruptFrame) void {
     _ = frame; // CPU context not needed here
-    if (ps2_ctrl.onIrq1Interrupt()) |scancode| {        // ⇐ low-level read
-        if (kbd_mgr.keyboard1) |*kbd| {                 // we assume port-1 kbd
-            if (kbd.processScancode(scancode)) |evt| {  // ⇐ decode
+    if (ps2_ctrl.onIrq1Interrupt()) |scancode| {
+        if (kbd_mgr.keyboard1) |*kbd| { // assume port1
+            if (kbd.processScancode(scancode)) |evt| {
+                // decode
                 if (evt.pressed) {
                     if (evt.char) |ch| {
                         std.log.debug("Got char {c} from keyboard\n", .{ch});
@@ -661,7 +577,8 @@ pub fn setup_irq(ctrl: *Ps2Controller, mgr: *KeyboardManager) !void {
 }
 
 
-
+// Lovely buffering keyboard
+// for when we have threading!!!!!!
 pub const KeyboardBuffer = struct {
     buffer: [256]u8 = [_]u8{0} ** 256,
     read_pos: u8 = 0,
@@ -734,7 +651,7 @@ pub const KeyboardBuffer = struct {
     }
 
     // Interrupt handler to put characters in buffer
-    fn keyboardInterruptHandler(frame: *arch.irq.InterruptFrame) void {
+    fn bufferedKeyboardInterruptHandler(frame: *arch.irq.InterruptFrame) void {
         _ = frame;
         if (ps2_ctrl.onIrq1Interrupt()) |scancode| {
             if (kbd_mgr.keyboard1) |*kbd| {
@@ -760,7 +677,7 @@ pub const KeyboardBuffer = struct {
         ps2_ctrl = ctrl;
         kbd_mgr = mgr;
         try arch.irq.irq.unregisterIrq(1); // Unregister any previous handler
-        try arch.irq.irq.registerIrq(1, keyboardInterruptHandler);
+        try arch.irq.irq.registerIrq(1, bufferedKeyboardInterruptHandler);
         arch.irq.irq.enable();
     }
 

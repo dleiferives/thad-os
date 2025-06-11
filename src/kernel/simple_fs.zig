@@ -6,12 +6,12 @@ const kernel = @import("kernel.zig");
 
 const log = std.log.scoped(.simple_fs);
 
-// Simple filesystem node that wraps ext2
+// VFS that wraps ext2
 pub const SimpleNode = struct {
-    // VFS node (must be first for casting)
+    // VFS requires this to be first
     vfs_node: vfs.VfsNode,
 
-    // Simple filesystem specific data
+    // Simplefs data
     is_directory: bool,
     inode_number: u64,
     file_size: u64,
@@ -42,12 +42,12 @@ pub const SimpleNode = struct {
             .vfs_node = vfs.VfsNode{
                 .name = "/",
                 .parent = null,
-                .mount = undefined, // Will be set when mounted
+                .mount = undefined,
                 .vtable = &vtable,
                 .private_data = node,
             },
             .is_directory = true,
-            .inode_number = 2, // Root inode
+            .inode_number = 2,
             .file_size = 0,
             .children = std.ArrayList(*SimpleNode).init(allocator),
             .allocator = allocator,

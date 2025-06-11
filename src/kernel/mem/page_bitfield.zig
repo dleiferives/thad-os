@@ -155,7 +155,6 @@ pub const PageBitField = struct {
         return null;
     }
 
-    /// Returns the number of pages in the bitfield.
     pub fn getFreePages(self: *PageBitField) u64 {
         var free_pages: u64 = 0;
         for (self.bitfield) |bit| {
@@ -164,7 +163,6 @@ pub const PageBitField = struct {
         return self.pages - free_pages;
     }
 
-    /// Returns the number of reserved pages in the bitfield.
     pub fn getReserved(self: *PageBitField) u64 {
         var reserved_pages: u64 = 0;
         for (self.bitfield) |bit| {
@@ -245,7 +243,6 @@ pub const PageBitField = struct {
         return null;
     }
 
-    /// Frees a page from the bitfield.
     pub fn freePage(self: *PageBitField, address: u64) !void {
         if (try self.getBitId(address)) |bit_id| {
             if (bit_id.index >= self.bitfield.len) {
@@ -366,7 +363,6 @@ pub const PageBitField = struct {
 
         std.log.warn("\nPageBitFeildTest: Free all pages\n",.{});
     }
-
 
 };
 

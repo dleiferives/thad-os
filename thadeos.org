@@ -1,0 +1,41 @@
+#+title: Thadeos
+
+* TODOS
+** Clean up all the files [2/3]
+***  [X] kernel [19/19]
+****  [X] syscall
+****  [X] thread
+****  [X] main
+****  [X] vfs
+****  [X] thread_queue
+****  [X] snakes
+****  [X] threading
+****  [X] simple fs
+****  [X] Run to completion
+****  [X] time sharign
+****  [X] Round robin
+****  [X] scheduler
+****  [X] mutex
+****  [X] mbr
+****  [X] ext2
+****  [X] elf
+****  [X] elf_loader
+****  [X] multiboot
+****  [X] mem
+*** [X] drivers [9/9]
+****  [X] block_device
+****  [X] ata
+****  [X] blocking_keyboard
+****  [X] keyboard
+****  [X] vga
+****  [X] ps2
+****  [X] uart
+****  [X] serial
+****  [X] serial_log
+***  [ ] Arch [3/6]
+**** [X] boot
+**** [X] irq -- 80%
+**** [ ] context_switch -- move to cpu.zig
+**** [ ] interrupt_stubs -- 80%
+**** [ ] cpu.zig
+**** [X] gdt.zig

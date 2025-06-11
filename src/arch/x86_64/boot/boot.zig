@@ -1,3 +1,4 @@
+// src/arch/x86_64/boot/boot.zig
 const std = @import("std");
 const arch = @import("arch");
 const kernel = @import("kernel");
@@ -30,12 +31,11 @@ pub const std_options: std.Options = .{
 export var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack") = undefined;
 
 
-
-
 // TODO @(dleiferives,ab22758a-dd7e-42ad-916b-bff21ff6c8e2): Replace this with zig
 // and not asm ~#
 comptime {
     asm (
+        // setup the multiboot header
         \\ .set MBOOT2_MAGIC, 0xE85250D6
         \\ .set MBOOT2_ARCH, 0
         \\ .set MBOOT2_LENGTH, (Multiboot2HeaderEnd - Multiboot2Header)
@@ -53,62 +53,61 @@ comptime {
         \\ .short 0
         \\ .long 8
         \\ Multiboot2HeaderEnd:
-        \\
-        \\
+
+        // === 32-bit code ===
         \\ .att_syntax prefix
         \\ .code32
         \\
         \\ .section .text
         \\ .global _entry
         \\ _entry:
-        \\ /* Disable interrupts */
         \\ cli
-        \\
-        \\ /* Set up initial stack */
+
+        // Setup the stack pointer
         \\ movl $(KERNEL_VIRTUAL_STACK_END - 0xFFFFFF8000000000), %esp
-        \\
-        \\ /* Check for multiboot */
+
+        // Check for multiboot!
         \\ cmpl $0x36d76289, %eax
         \\ jne .no_multiboot
-        \\
-        \\ /* Save multiboot info pointer */
+
+        // Save the location of the multiboot info structure
         \\ movl %ebx, (multiboot_info_ptr - 0xFFFFFF8000000000)
-        \\
-        \\ /* Load our page tables */
+
+        // Load our page tables!
         \\ movl $(BootP4 - 0xFFFFFF8000000000), %eax
         \\ movl %eax, %cr3
-        \\
-        \\ /* Enable PAE */
+
+        // Enable paging and long mode
         \\ movl %cr4, %eax
         \\ orl $(1 << 5), %eax
         \\ movl %eax, %cr4
-        \\
-        \\ /* Set long mode bit */
+
+        // Setup for longmode
         \\ movl $0xC0000080, %ecx
         \\ rdmsr
         \\ orl $(1 << 8), %eax
         \\ wrmsr
-        \\
-        \\ /* Enable paging */
+
+        // Enable paging
         \\ movl %cr0, %eax
         \\ orl $(1 << 31), %eax
         \\ movl %eax, %cr0
-        \\
-        \\ /* Load GDT */
+
+        // Load gdt
         \\ lgdt (BootGDTPtr - 0xFFFFFF8000000000)
-        \\
-        \\ /* Jump to 64-bit code segment */
+
+        // Jump to 64 bit mode
         \\ ljmp $0x8, $(long_mode_start - 0xFFFFFF8000000000)
-        \\
+
+        // Deep error if we don't have multiboot
         \\ .no_multiboot:
-        \\ /* Handle error - just halt */
         \\ hlt
         \\ jmp .no_multiboot
-        \\
+
+        // === 64-bit code ===
         \\ .align 8
         \\ .code64
         \\ long_mode_start:
-        \\ /* Update segment registers */
         \\ movw $0x10, %ax
         \\ movw %ax, %ss
         \\ movw %ax, %ds
@@ -116,65 +115,64 @@ comptime {
         \\ movw %ax, %fs
         \\ movw %ax, %gs
         \\
-        \\ /* Jump to higher half kernel */
+
+        // Jump to our higher half code!
         \\ movabs $higher_half_start, %rax
         \\ jmpq *%rax
         \\
         \\ .code64
         \\ higher_half_start:
-        \\ /* Now we're running in the higher half */
-        \\
-        \\ /* Update stack pointer to higher half */
+
+        // update our stack pointer to the higher half
         \\ movq $0xFFFFFF8000000000, %rax
         \\ addq %rax, %rsp
-        \\
-        \\ /* Unmap identity mapping of lower memory */
+
+        // Unmap the lower memory..
         \\ movq $0, %rax                  # Value to write (0)
         \\ movabs $BootP4, %rbx           # Load the 64-bit address of BootP4 into RBX
         \\ movq %rax, (%rbx)              # Write the value from RAX to the address in RBX
         \\
-        \\ /* Reload cr3 to flush TLB */
+        // Manually reload our page tables!
+        // this is so that the tlb gets flushed
         \\ movq %cr3, %rax
         \\ movq %rax, %cr3
-        \\
-        \\ /* Reload GDT with higher half address */
+
+        // Reload other things witht he higher half stuff too
         \\ movabs $BootGDTPtr, %rax
         \\ lgdt (%rax)
-        \\
-        \\ /* Reload CS register */
         \\ movabs $reload_cs, %rax
         \\ pushq $0x8
         \\ pushq %rax
         \\ lretq
-        \\
+
+        // Call the kmain!
         \\ reload_cs:
-        \\ /* Call into C code */
         \\ movabs $kmain, %rax
         \\ call *%rax
-        \\
-        \\ /* If C code returns, halt the CPU */
+
+        // Return to assembly code
+        // dunno what to do here tbh
         \\ cli
         \\ hlt
         \\ jmp .
-        \\
-        \\ /* Data section */
+
+        // Memory for the multiboot info pointer
         \\ .section .data
         \\ .align 8
         \\ multiboot_info_ptr:
         \\ .quad 0
-        \\
-        \\
-        \\ /* Global Descriptor Table */
+
+        // Setting up the gdt
         \\ .section .rodata
         \\ .align 16
         \\ BootGDT:
-        \\ /* Null descriptor */
         \\ .quad 0
-        \\ /* Code segment descriptor */
+        // Code segment
         \\ .quad 0x00AF9A000000FFFF
-        \\ /* Data segment descriptor */
+        // Data segment
         \\ .quad 0x00AF92000000FFFF
-        \\
+
+        // Manual allocation for the GDT pointer
         \\ BootGDTPtr:
         \\ .word BootGDTPtr - BootGDT - 1
         \\ .quad BootGDT
@@ -182,18 +180,14 @@ comptime {
         \\ .align 4096
         \\ .global BootP4
         \\ BootP4:
-        \\ /* Identity map first 1GB for boot (first entry) */
         \\ .quad BootP3 - 0xFFFFFF8000000000 + ((1 << 0) | (1 << 1))
-        \\ /* Middle entries empty */
         \\ .rept 512 - 2
         \\ .quad 0
         \\ .endr
-        \\ /* Last entry (for higher half kernel) */
         \\ .quad BootP3 - 0xFFFFFF8000000000 + ((1 << 0) | (1 << 1))
         \\
         \\ .align 4096
         \\ BootP3:
-        \\ /* Map first 1GB using huge pages */
         \\ .quad BootP2 - 0xFFFFFF8000000000 + ((1 << 0) | (1 << 1))
         \\ .rept 512 - 1
         \\ .quad 0
@@ -201,10 +195,9 @@ comptime {
         \\
         \\ .align 4096
         \\ BootP2:
-        \\ /* Map 2MB pages for first 1GB */
         \\ .set i, 0
         \\ .rept 512
-        \\ .quad (i << 21) + ((1 << 0) | (1 << 1) | (1 << 7))  /* Set huge page bit */
+        \\ .quad (i << 21) + ((1 << 0) | (1 << 1) | (1 << 7))
         \\ .set i, i+1
         \\ .endr
     );

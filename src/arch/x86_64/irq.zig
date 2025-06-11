@@ -39,14 +39,13 @@ pub const Vector = enum(u8) {
 
     // System calls
 
-    // TODO @(dleiferives,05739ef9-0365-4d71-b6d7-168f52fe27fb): need to add yeild
-    // as a syscall for threading ~#
     // TODO @(dleiferives,84617f56-0ea9-4ae4-9a45-828cbaa35998): need to add
     // thread_exit as a syscall that calls a trap, which then does the thread
     // deallocation ~#
     syscall = 128,
     thread_cleanup = 129,
 
+    // helpers
     pub fn toValue(self: Vector) u8 {
         return @intFromEnum(self);
     }
@@ -72,6 +71,8 @@ pub const Vector = enum(u8) {
     }
 };
 
+// TODO @(dleiferives,31d279b9-9365-4492-96d0-aafee0036164): Unify the two
+// contexts... I shouldn't have two ~#
 pub const InterruptFrame = extern struct {
     // Segment registers
     gs: u64, fs: u64, es: u64, ds: u64,
@@ -93,6 +94,7 @@ pub const InterruptFrame = extern struct {
     rsp: u64,
     ss: u64,
 
+    // helper
     pub fn toThreadContext(self: @This()) thread.ThreadContext{
         return .{
             .rax = self.rax,
@@ -188,6 +190,8 @@ pub const idt = struct {
     }
 
     // Import stub addresses from assembly
+    // TODO @(dleiferives,0e686780-9b9e-4310-bca1-697fb11c652f): update this (the
+    // asm) to be done in zig ~#
     extern const interrupt_stubs: [256]u64;
 
     pub fn setupStubs() void {
@@ -255,9 +259,9 @@ const pic = struct {
             port = CONTROLLER_DATA;
         } else {
             port = FOLLOWER_DATA;
-            // For slave PIC IRQs (8-15), also unmask cascade line (IRQ 2) on master
-            const master_current = cpu.inb(CONTROLLER_DATA);
-            cpu.outb(CONTROLLER_DATA, master_current & ~(@as(u8, 1) << 2));
+            // we have to be sure to unmask the second controller
+            const controller_current = cpu.inb(CONTROLLER_DATA);
+            cpu.outb(CONTROLLER_DATA, controller_current & ~(@as(u8, 1) << 2));
         }
         const bit = if (irq_num < 8) irq_num else irq_num - 8;
         const current = cpu.inb(port);
@@ -280,22 +284,12 @@ const pic = struct {
     };
 };
 
-
-
-
 // Interrupt Dispatcher //
 pub const dispatcher = struct {
     var handlers: [256]?HandlerFn = [_]?HandlerFn{null} ** 256;
 
-    pub fn register(vector: Vector, handler: HandlerFn) void {
-        handlers[vector.toValue()] = handler;
-    }
 
-    pub fn unregister(vector: Vector) void {
-        handlers[vector.toValue()] = null;
-    }
-
-    // Called from assembly stub
+    // Called from assembly!
     export fn interrupt_dispatcher(frame: *InterruptFrame) callconv(.C) void {
         const vector_n = Vector.fromValue(@intCast(frame.vector));
         if (vector_n == null) {
@@ -327,8 +321,20 @@ pub const dispatcher = struct {
             asm volatile ("cli; hlt");
         }
     }
+
+    // helpers
+    pub fn register(vector: Vector, handler: HandlerFn) void {
+        handlers[vector.toValue()] = handler;
+    }
+
+    pub fn unregister(vector: Vector) void {
+        handlers[vector.toValue()] = null;
+    }
+
+
 };
 
+// TODO @(dleiferives,e195c28e-a228-4da6-94b1-98e103549202): add a logger scope ~#
 pub const exceptions = struct {
     fn formatException(comptime name: []const u8, frame: *InterruptFrame) void {
         std.log.err("EXCEPTION: {s}", .{name});
@@ -419,19 +425,6 @@ pub const exceptions = struct {
         syscall.handleSyscall(frame);
     }
 
-    // fn cleanupHandler(frame: *InterruptFrame) void {
-    //     std.log.debug("cleanup handler",.{});
-
-    //     if (thread.cleanup_thread) |cleanup| {
-    //         if (thread.getCurrentThread()) |current| {
-    //             if (current != cleanup) {
-    //                 thread.switchContext(current, cleanup,frame);
-    //             }
-    //         }
-    //     }
-    // }
-
-
 
     pub fn init() void {
         dispatcher.register(.divide_error, genericException("Divide Error"));
@@ -458,11 +451,11 @@ pub const exceptions = struct {
 
     pub fn initThreading() void{
         dispatcher.register(.syscall, syscallHandler);
-        // dispatcher.register(@enumFromInt(thread.THREAD_CLEANUP_VECTOR), cleanupHandler);
     }
 
 };
 
+// TODO @(dleiferives,f5e5ee61-e726-4315-82e5-e7f4c815b2eb): add a logger scope ~#
 pub const irq = struct {
     var current_controller: Controller = pic.controller;
 
@@ -511,7 +504,6 @@ pub const irq = struct {
         std.log.info("Unmasking IRQ {} for ATA", .{irq_num});
         try current_controller.unmask(irq_num);
 
-        // Debug: Read back the mask to verify
         const mask_port: u8 = if (irq_num < 8) 0x21 else 0xA1;
         const current_mask = cpu.inb(mask_port);
         std.log.info("IRQ {} mask register 0x{X}: 0x{X:0>2}", .{irq_num, mask_port, current_mask});

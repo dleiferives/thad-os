@@ -21,18 +21,23 @@ pub inline fn outb(port: u16, value: u8) void {
 }
 
 
+/// Halt the CPU until the next interrupt
 pub inline fn halt() void {
     asm volatile ("hlt");
 }
 
+/// disable interrupts
 pub inline fn cli() void {
     asm volatile ("cli");
 }
 
+/// enable interrupts
 pub inline fn sti() void {
     asm volatile ("sti");
 }
 
+/// Check if the CPU is currently in an interrupt context
+// TODO @(dleiferives,6f0ab042-c201-4f07-83d1-a7ead4c6afb3): remove duplication ~#
 pub inline fn in_interrupt() bool {
     var flags: u64 = 0;
     asm volatile (

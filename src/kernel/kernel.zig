@@ -19,11 +19,11 @@ const elf_loader = @import("elf_loader.zig");
 
 const log = std.log.scoped(.kernel);
 
+// Required forward declarations / uses such that teh compiler will have the
+// symbols ready for linking at the right time.
 comptime {
     _ = mem.memset;
     _ = mem.memcpy;
-
-    // early setting the container allocator to be linked to the kernel
     _ = mem.Manager;
     _ = snakes.kfree;
     _ = snakes.kmalloc;
@@ -172,9 +172,6 @@ pub fn main() !void {
     defer drivers.uart.deinit();
     arch.irq.irq.enable();
 
-    // // Enable interrupts
-
-    // // Simple output
     try drivers.uart.print("Hello, World!\n", .{});
 
     if (state.testing.map_dispatch) {
@@ -231,7 +228,6 @@ pub fn main() !void {
 
     thread.Thread.yield();
 
-    // begin testing for threading
     while (true) {
         arch.cpu.halt();
     }
@@ -838,7 +834,6 @@ pub fn testDemandPaging() !void {
     log.info("Demand paging test completed successfully!", .{});
 }
 
-// Add VFS test function
 fn testVfsOperations() !void {
     log.info("=== Testing VFS Operations ===", .{});
 
@@ -891,7 +886,6 @@ fn testVfsOperations() !void {
 
     log.info("Found {} entries in root directory", .{readdir_state.count});
 
-    // --- NEW TEST CODE ---
     log.info("--- Testing file read: /boot/grub/grub.cfg ---", .{});
     const grub_cfg_path = "/boot/grub/grub.cfg";
     const file_fd = vfs.vfs_open(
@@ -899,8 +893,6 @@ fn testVfsOperations() !void {
         vfs.FileDescriptor.O_RDONLY,
     ) catch |err| {
         log.err("Failed to open '{s}': {}", .{ grub_cfg_path, err });
-        // This might fail if the file doesn't exist, which is okay.
-        // We'll continue to the next test.
         log.info("--- File read test skipped ---", .{});
         log.info("=== VFS Tests Complete ===", .{});
         return;
@@ -965,9 +957,7 @@ fn testVfsOperations() !void {
 }
 
 pub fn kputc(ch: u8) void {
-    // arch.cpu.cli(); // Ensure atomic character output
-    // defer arch.cpu.sti();
-
+    // possibly disable interrupts?
     if (drivers.vga.initialized and state.options.vga_printing) {
         drivers.vga.putChar(ch);
     }

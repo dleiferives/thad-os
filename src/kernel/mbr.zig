@@ -123,7 +123,7 @@ pub const PartitionEntryIterator = struct {
     entries: [4]partition_table_entry,
     index: usize = 0,
 
-    pub fn init(dev: *drivers.block_device.BlockDev) ?PartitionEntryIterator {
+    pub fn init(dev: *drivers.block_device.BlockDev) PartitionEntryIterator {
         var mbr_bytes: [512]u8 = undefined;
         dev.readBlock(0, &mbr_bytes) catch {return null;};
         const mbr_data = mbr.fromBytes(mbr_bytes[0..]);

@@ -1,8 +1,5 @@
-//! Global Descriptor Table (GDT) implementation for x86_64
-//! Provides kernel/user privilege separation and Task State Segment (TSS) management
-
+// src/arch/x86_64/gdt.zig
 const std = @import("std");
-const arch = @import("../arch.zig");
 
 const log = std.log.scoped(.arch_gdt);
 
@@ -20,7 +17,6 @@ const ACCESS = struct {
     const TSS_AVAILABLE: u8 = 0x9;    // Available 64-bit TSS
 };
 
-/// GDT Flags (upper 4 bits of limit/flags field)
 const FLAGS = struct {
     const GRANULARITY: u8 = 1 << 3;   // 4KB granularity
     const SIZE: u8 = 1 << 2;          // 32-bit segment (ignored in 64-bit)
@@ -36,12 +32,11 @@ pub const SELECTOR = struct {
     pub const USER_CODE: u16 = 0x20;
     pub const TSS: u16 = 0x28;
 
-    // RPL (Requested Privilege Level) masks
+    // privelege level masks
     pub const RPL_MASK: u16 = 0x03;
     pub const KERNEL_RPL: u16 = 0x00;
     pub const USER_RPL: u16 = 0x03;
 
-    // Helper functions
     pub fn withRPL(selector: u16, rpl: u16) u16 {
         return (selector & ~RPL_MASK) | (rpl & RPL_MASK);
     }
@@ -103,12 +98,15 @@ const GdtEntry = packed struct {
 
 /// TSS entry (16 bytes in x86_64) -- we treat this as two entries
 const TssEntry = packed struct {
+    // look at the gdt entry for these
     limit_low: u16,
     base_low: u16,
     base_mid: u8,
     access: u8,
     limit_flags: u8,
     base_high: u8,
+    // these are the upper 32 bits of the base
+    // this is specific to x86_64 TSS
     base_upper: u32,
     reserved: u32, // zero
 
@@ -165,20 +163,23 @@ const TaskStateSegment = packed struct {
     }
 };
 
-/// GDT Pointer structure for lgdt instruction
+/// GDT Pointer for lgdt instruction
 const GdtPointer = packed struct {
     limit: u16,
     base: u64,
 };
 
-/// The actual GDT table  in use
+/// The actual GDT table  in use is hardcoded...
+/// which like... I would like to paramaterize this, but
+/// I cannot keep getting stuck in the weeds with this stuff.
+/// (look at multiboot lmao)
 ///  - null
 ///  - kcode
 ///  - kdata
 ///  - udata
 ///  - ucode
 ///  - tss_low
-///  - tss_high)
+///  - tss_high
 var gdt_table: [7]u64 align(8) = undefined;
 
 /// TSS instance
@@ -252,88 +253,6 @@ pub fn init() void {
     log.info("GDT initialized successfully", .{});
 }
 
-fn loadGdt() void {
-    asm volatile (
-        \\lgdt (%[gdt_ptr])
-        :
-        : [gdt_ptr] "r" (&gdt_ptr),
-        : "memory"
-    );
-
-    asm volatile (
-        \\mov %[data_sel], %%ax
-        \\mov %%ax, %%ds
-        \\mov %%ax, %%es
-        \\mov %%ax, %%fs
-        \\mov %%ax, %%gs
-        \\mov %%ax, %%ss
-        \\pushq %[code_sel]
-        \\leaq 1f(%%rip), %%rax
-        \\pushq %%rax
-        \\lretq
-        \\1:
-        :
-        : [data_sel] "i" (SELECTOR.KERNEL_DATA),
-          [code_sel] "i" (SELECTOR.KERNEL_CODE),
-        : "rax", "memory"
-    );
-}
-
-/// Load the TSS using ltr instruction
-fn loadTss() void {
-    asm volatile (
-        \\ltr %[tss_sel]
-        :
-        : [tss_sel] "r" (@as(u16, SELECTOR.TSS)),
-        : "memory"
-    );
-}
-
-
-/// Set the kernel stack pointer in the TSS
-/// This stack will be used when transitioning from user mode to kernel mode
-pub fn setKernelStack(stack_top: u64) void {
-    if (!initialized) {
-        log.err("GDT not initialized", .{});
-        return;
-    }
-
-    tss.rsp0 = stack_top;
-    log.debug("Kernel stack set to 0x{X:0>16}", .{stack_top});
-}
-
-/// Set an interrupt stack table entry
-pub fn setInterruptStack(ist_index: u3, stack_top: u64) void {
-    if (!initialized) {
-        log.err("GDT not initialized", .{});
-        return;
-    }
-
-    if (ist_index == 0 or ist_index > 7) {
-        log.err("Invalid IST index: {}", .{ist_index});
-        return;
-    }
-
-    switch (ist_index) {
-        1 => tss.ist1 = stack_top,
-        2 => tss.ist2 = stack_top,
-        3 => tss.ist3 = stack_top,
-        4 => tss.ist4 = stack_top,
-        5 => tss.ist5 = stack_top,
-        6 => tss.ist6 = stack_top,
-        7 => tss.ist7 = stack_top,
-        else => unreachable,
-    }
-
-    log.debug("IST{} set to 0x{X:0>16}", .{ ist_index, stack_top });
-}
-
-/// Get the current kernel stack pointer from TSS
-pub fn getKernelStack() u64 {
-    return if (initialized) tss.rsp0 else 0;
-}
-
-
 /// Switch to user mode and jump to the specified address
 /// This function does not return - it transfers control to user space
 // TODO @(dleiferives,c626aaae-48af-46bc-a7fb-d7dc183f6b71): FINISH ~#
@@ -380,34 +299,7 @@ pub fn switchToUserMode(user_rip: u64, user_rsp: u64) noreturn {
         : "rax", "memory"
     );
 
-    unreachable;
-}
-
-
-/// Get the current code segment selector
-pub fn getCurrentCS() u16 {
-    return asm volatile (
-        \\mov %%cs, %[result]
-        : [result] "=r" (-> u16),
-    );
-}
-
-/// Get the current data segment selector
-pub fn getCurrentDS() u16 {
-    return asm volatile (
-        \\mov %%ds, %[result]
-        : [result] "=r" (-> u16),
-    );
-}
-
-/// Check if currently running in kernel mode
-pub fn isKernelMode() bool {
-    return (getCurrentCS() & SELECTOR.RPL_MASK) == SELECTOR.KERNEL_RPL;
-}
-
-/// Check if currently running in user mode
-pub fn isUserMode() bool {
-    return (getCurrentCS() & SELECTOR.RPL_MASK) == SELECTOR.USER_RPL;
+    @panic("Failed to switch to user mode - this something has gone horribly wrong!");
 }
 
 /// Print GDT information for debugging
@@ -425,7 +317,6 @@ pub fn debugPrint() void {
     log.info("Current DS: 0x{X:0>4}", .{getCurrentDS()});
     log.info("Kernel Stack (RSP0): 0x{X:0>16}", .{tss.rsp0});
 
-    // Print GDT entries
     for (gdt_table, 0..) |entry, i| {
         if (entry != 0) {
             log.info("GDT[{}]: 0x{X:0>16}", .{ i, entry });
@@ -436,7 +327,6 @@ pub fn debugPrint() void {
 pub fn tester() !void {
     log.info("Running GDT tests...", .{});
 
-    // Basic sanity checks
     if (!initialized) {
         return error.NotInitialized;
     }
@@ -460,5 +350,111 @@ pub fn tester() !void {
         return error.TssNotLoaded;
     }
 
+    // TODO @(dleiferives,ede62f93-22e7-498e-a663-0b1331247cb4): add more tests! like
+    // switching between user and kernel modes ~#
+
+
     log.info("GDT tests passed", .{});
+}
+
+// Helpers
+
+pub fn getCurrentCS() u16 {
+    return asm volatile (
+        \\mov %%cs, %[result]
+        : [result] "=r" (-> u16),
+    );
+}
+
+pub fn getCurrentDS() u16 {
+    return asm volatile (
+        \\mov %%ds, %[result]
+        : [result] "=r" (-> u16),
+    );
+}
+
+pub fn isKernelMode() bool {
+    return (getCurrentCS() & SELECTOR.RPL_MASK) == SELECTOR.KERNEL_RPL;
+}
+
+pub fn isUserMode() bool {
+    return (getCurrentCS() & SELECTOR.RPL_MASK) == SELECTOR.USER_RPL;
+}
+
+/// Set the kernel stack pointer in the TSS
+/// This stack will be used when transitioning from user mode to kernel mode
+pub fn setKernelStack(stack_top: u64) void {
+    if (!initialized) {
+        log.err("GDT not initialized", .{});
+        return;
+    }
+
+    tss.rsp0 = stack_top;
+    log.debug("Kernel stack set to 0x{X:0>16}", .{stack_top});
+}
+
+pub fn setInterruptStack(ist_index: u3, stack_top: u64) void {
+    if (!initialized) {
+        log.err("GDT not initialized", .{});
+        return;
+    }
+
+    if (ist_index == 0 or ist_index > 7) {
+        log.err("Invalid IST index: {}", .{ist_index});
+        return;
+    }
+
+    switch (ist_index) {
+        1 => tss.ist1 = stack_top,
+        2 => tss.ist2 = stack_top,
+        3 => tss.ist3 = stack_top,
+        4 => tss.ist4 = stack_top,
+        5 => tss.ist5 = stack_top,
+        6 => tss.ist6 = stack_top,
+        7 => tss.ist7 = stack_top,
+        else => unreachable,
+    }
+
+    log.debug("IST{} set to 0x{X:0>16}", .{ ist_index, stack_top });
+}
+
+pub fn getKernelStack() u64 {
+    return if (initialized) tss.rsp0 else 0;
+}
+
+
+fn loadGdt() void {
+    asm volatile (
+        \\lgdt (%[gdt_ptr])
+        :
+        : [gdt_ptr] "r" (&gdt_ptr),
+        : "memory"
+    );
+
+    asm volatile (
+        \\mov %[data_sel], %%ax
+        \\mov %%ax, %%ds
+        \\mov %%ax, %%es
+        \\mov %%ax, %%fs
+        \\mov %%ax, %%gs
+        \\mov %%ax, %%ss
+        \\pushq %[code_sel]
+        \\leaq 1f(%%rip), %%rax
+        \\pushq %%rax
+        \\lretq
+        \\1:
+        :
+        : [data_sel] "i" (SELECTOR.KERNEL_DATA),
+          [code_sel] "i" (SELECTOR.KERNEL_CODE),
+        : "rax", "memory"
+    );
+}
+
+fn loadTss() void {
+    asm volatile (
+        \\ltr %[tss_sel]
+        :
+        : [tss_sel] "r" (@as(u16, SELECTOR.TSS)),
+        : "memory"
+    );
 }

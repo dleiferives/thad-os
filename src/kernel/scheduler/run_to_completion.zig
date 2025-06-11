@@ -49,8 +49,6 @@ pub const RunToCompletionScheduler = struct {
     fn addThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Add to end of queue (FIFO) by appending to the list.
-        // We catch and map the potential allocation error.
         try self.ready_queue.append(self.allocator, thread);
 
         thread.state = .READY;
@@ -125,14 +123,12 @@ pub const RunToCompletionScheduler = struct {
     fn reset(ptr: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Clear the list and free its associated memory.
         self.ready_queue.clearAndFree(self.allocator);
         self.context_switches = 0;
     }
 
     fn deinit(ptr: *anyopaque, allocator: std.mem.Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        // Deinitialize the internal list first to prevent memory leaks.
         self.ready_queue.deinit(self.allocator);
         allocator.destroy(self);
     }

@@ -1,12 +1,13 @@
-//! Simple VGA text mode driver (80x25)
 const std = @import("std");
 const arch = @import("arch");
 
-/// Writer type for std library integration
 const Writer = std.io.Writer;
 const log = std.log.scoped(.drivers_vga);
 
 /// Screen dimensions
+// TODO @(dleiferives,63b19c29-b7ac-4f1d-aaa8-fa9a8121754b): should grab this
+// stuff from the multiboot header... and like... but I'm not going to. that's a
+// pain! ~#
 pub const WIDTH = 80;
 pub const HEIGHT = 25;
 pub const TAB_WIDTH = 4;
@@ -39,7 +40,6 @@ var fg_color: u4 = @intFromEnum(Color.LIGHT_GRAY);
 var bg_color: u4 = @intFromEnum(Color.BLACK);
 pub var initialized: bool = false;
 
-/// Initialize the VGA driver
 pub fn init(buffer_addr: usize) void {
     if (initialized) return;
 
@@ -54,7 +54,6 @@ pub fn init(buffer_addr: usize) void {
     initialized = true;
 }
 
-/// Clear the screen
 pub fn clear() void {
     const entry = makeEntry(' ', fg_color, bg_color);
     for (0..WIDTH * HEIGHT) |i| {
@@ -64,18 +63,15 @@ pub fn clear() void {
     column = 0;
 }
 
-/// Set text colors
 pub fn setColor(foreground: Color, background: Color) void {
     fg_color = @intFromEnum(foreground);
     bg_color = @intFromEnum(background);
 }
 
-/// Create a VGA entry
 pub fn makeEntry(ch: u8, fg: u4, bg: u4) u16 {
     return @as(u16, ch) | (@as(u16, fg) << 8) | (@as(u16, bg) << 12);
 }
 
-/// Write a single character
 pub fn putChar(ch: u8) void {
     // TODO @(dleiferives,862ce5ad-e65c-45a7-969d-aa49222a8014): add cli and sti
     // here ~#
@@ -127,30 +123,25 @@ pub fn putChar(ch: u8) void {
     arch.irq.irq.enable();
 }
 
-/// Write a string
 pub fn putStr(str: []const u8) void {
     for (str) |ch| {
         putChar(ch);
     }
 }
 
-/// Writer function for std.io.Writer interface
 fn writerFn(_: void, bytes: []const u8) error{}!usize {
     putStr(bytes);
     return bytes.len;
 }
 
-/// Get a writer for printing formatted strings
 pub fn writer() Writer(void, error{}, writerFn) {
     return .{ .context = {} };
 }
 
-/// Print a formatted string to the VGA buffer
 pub fn print(comptime format: []const u8, args: anytype) !void {
     try writer().print(format, args);
 }
 
-/// Shut down the VGA driver
 pub fn deinit() void {
     if (!initialized) return;
 

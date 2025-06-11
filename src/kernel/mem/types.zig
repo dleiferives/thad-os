@@ -1,15 +1,10 @@
-//! Types and constants related to memory addressing and organization
 const std = @import("std");
-// const frame_allocator = @import("frame_allocator.zig");
 
 const layout_log = std.log.scoped(.mem_layout);
 
-// const PAGE_SIZE = frame_allocator.PAGE_SIZE;
 pub const PAGE_SIZE: u64 = 4096; // 4 KiB
 
-/// Address space layout constants
 pub const MEMORY_LAYOUT = struct {
-    // Canonical address limitation (48-bit addressing)
     kernel_offset: u64,
     kernel_virtual_address_start: u64,
     kernel_virtual_address_end: u64,

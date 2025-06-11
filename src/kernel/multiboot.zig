@@ -1,3 +1,4 @@
+// For when I write my next os, setup a pretty good structure here.
 const std = @import("std");
 const types = @import("mem/types.zig");
 const elf = @import("elf.zig");
@@ -13,12 +14,10 @@ pub fn loadInfoHeader(kernel_offset: u64) *InfoHeader {
     return @ptrFromInt(kernel_offset | ptr_raw);
 }
 
-// INFO
-/// Error type for Multiboot2 operations
 pub const MultibootError = error{
     InvalidInfoStructure,
     TagNotFound,
-    InvalidMagic, // If magic number in EAX is wrong
+    InvalidMagic,
 };
 
 /// Multiboot2 tag types (for boot information structure)
@@ -41,7 +40,7 @@ pub const TagType = enum(u32) {
     ACPI_NEW_RSDP = 15,
     NETWORK_INFO = 16,
     EFI_MEMORY_MAP = 17,
-    EFI_BOOT_SERVICES_NOT_TERMINATED = 18, // Renamed for clarity
+    EFI_BOOT_SERVICES_NOT_TERMINATED = 18,
     EFI_32_IMAGE_HANDLE = 19,
     EFI_64_IMAGE_HANDLE = 20,
     IMAGE_LOAD_BASE_ADDR = 21,
@@ -101,7 +100,7 @@ pub const TagCast = union(TagType) {
     IMAGE_LOAD_BASE_ADDR: *const ImageLoadBaseAddrTag,
 };
 
-/// Multiboot2 information header (fixed part of boot information)
+/// Multiboot2 information header
 pub const InfoHeader = extern struct {
     total_size: u32,
     reserved: u32,
@@ -117,8 +116,6 @@ pub const TagHeader = extern struct {
     }
 
 };
-
-// --- Individual Tag Struct Definitions ---
 
 /// Command line tag (type 1)
 pub const CommandLineTag = extern struct {
@@ -141,7 +138,7 @@ pub const CommandLineTag = extern struct {
                     std.mem.copy(u8, buffer[0..len], value[0..len]);
                     return buffer[0..len];
                 } else {
-                    return ""; // Parameter exists but has no value
+                    return "";
                 }
             }
         }
@@ -501,7 +498,7 @@ pub const VBEInfoTag = extern struct {
     pub fn print(self: *const VBEInfoTag, writer: anytype) !void {
         try writer.print("VBE Info:\n", .{});
         try writer.print("  Mode: 0x{x:0>4}, Interface: {x:0>4}:{x:0>4} (len {})\n", .{ self.vbe_mode, self.vbe_interface_seg, self.vbe_interface_off, self.vbe_interface_len });
-        // Further parsing of vbe_control_info and vbe_mode_info is complex and VBE-spec dependent
+        // Going to just skip the rest because this looks like a lot of work
     }
 };
 
@@ -520,8 +517,10 @@ pub const FramebufferType = enum(u8) {
         };
     }
 };
+
 /// Color descriptor for indexed color modes
 pub const Color = extern struct { red: u8, green: u8, blue: u8 };
+
 /// RGB color information for direct RGB modes
 pub const RgbColorInfo = extern struct {
     red_field_position: u8,
@@ -689,7 +688,7 @@ pub const EfiMemoryMapTag = extern struct {
 };
 
 /// EFI boot services not terminated tag (type 18)
-pub const EfiBootServicesNotTerminatedTag = extern struct { // Renamed from EfiBootServicesTag
+pub const EfiBootServicesNotTerminatedTag = extern struct {
     header: TagHeader,
     pub fn print(self: *const EfiBootServicesNotTerminatedTag, writer: anytype) !void {
         _ = self;
@@ -735,7 +734,6 @@ pub const Multiboot2Info = struct {
         return Multiboot2Info{ .header_ptr = header };
     }
 
-    // --- Tag Iteration ---
     fn getFirstTag(self: Multiboot2Info) ?*const TagHeader {
         const first_tag_addr = @intFromPtr(self.header_ptr) + @sizeOf(InfoHeader);
         return @ptrFromInt(first_tag_addr);
@@ -760,7 +758,6 @@ pub const Multiboot2Info = struct {
         return @ptrCast(@alignCast(tag));
     }
 
-    // --- Module Handling ---
     pub fn getModules(self: Multiboot2Info, allocator: std.mem.Allocator) ![]*const ModuleTag {
         var list = std.ArrayList(*const ModuleTag).init(allocator);
         errdefer list.deinit();
@@ -824,7 +821,6 @@ pub const Multiboot2Info = struct {
         return null;
     }
 
-    // --- Utility ---
     pub fn getTotalMemory(self: Multiboot2Info) u64 {
         if (self.getMemoryMapTag()) |mmap| return mmap.getTotalAvailableMemory();
         if (self.getBasicMemoryInfoTag()) |basic| return basic.getTotalBytes();
@@ -839,7 +835,7 @@ pub const Multiboot2Info = struct {
         var current_tag:?*const TagHeader  = self.getFirstTag();
         var tag_idx: usize = 0;
         while (current_tag) |tag| : (tag_idx += 1) while_loop: {
-            if (tag.type == 0 and tag.size == 8) break; // End tag
+            if (tag.type == 0 and tag.size == 8) break;
             switch(tag.getType()) {
                 .END => {break :while_loop;},
                 .COMMAND_LINE => {
@@ -943,7 +939,7 @@ pub const Multiboot2Info = struct {
         tag_idx= 0;
         while (current_tag) |tag| : (tag_idx += 1) {
             try writer.print("  {d: <5} | {s: <25} | {d: <8} | {d: <8}\n", .{ tag_idx, tag.getType().toString(), tag.type, tag.size });
-            if (tag.type == 0 and tag.size == 8) break; // End tag
+            if (tag.type == 0 and tag.size == 8) break;
             current_tag = self.getNextTag(tag);
         }
         try writer.print("--- End Multiboot2 Information ---\n", .{});

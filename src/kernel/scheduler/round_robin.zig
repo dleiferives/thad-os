@@ -58,7 +58,6 @@ pub const RoundRobinScheduler = struct {
     fn addThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Create node and add to end of queue
         const node = self.allocator.create(std.DoublyLinkedList(*Thread).Node) catch {
             return SchedulerError.OutOfMemory;
         };
@@ -73,7 +72,6 @@ pub const RoundRobinScheduler = struct {
     fn removeThread(ptr: *anyopaque, thread: *Thread) SchedulerError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Find and remove the thread from the queue
         var it = self.ready_queue.first;
         while (it) |node| {
             if (node.data == thread) {
@@ -91,11 +89,9 @@ pub const RoundRobinScheduler = struct {
     fn selectNext(ptr: *anyopaque) ?*Thread {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Pop from front of queue
         if (self.ready_queue.popFirst()) |node| {
             const thread = node.data;
 
-            // Add back to end of queue (round robin behavior)
             self.ready_queue.append(node);
 
             thread.state = .RUNNING;
@@ -125,7 +121,6 @@ pub const RoundRobinScheduler = struct {
     fn shouldPreempt(ptr: *anyopaque, current_thread: *Thread) bool {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Preempt if time slice expired and there are other threads waiting
         return current_thread.remaining_time == 0 and self.ready_queue.len > 0;
     }
 

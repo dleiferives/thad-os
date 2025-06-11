@@ -3,7 +3,10 @@ const thread = @import("thread.zig");
 const arch = @import("arch");
 const kernel = @import("kernel.zig");
 const drivers = @import("drivers"); // Import drivers
+const elf_loader = @import("elf_loader.zig");
 
+// TODO @(dleiferives,6675cb9a-96bb-4de7-944b-60fcc32464da): add multi arguement
+// syscalls! ~#
 pub const SyscallError = error{
     InvalidSyscall,
     InvalidArgument,
@@ -17,10 +20,10 @@ pub const SyscallNumber = enum(u64) {
     THREAD_EXIT = 2,
     THREAD_CREATE = 3,
     THREAD_JOIN = 4,
-    PUTC = 5, // New
-    GETC = 6, // New
-    EXEC = 7, // New
-    FORK = 8, // New
+    PUTC = 5,
+    GETC = 6,
+    EXEC = 7,
+    FORK = 8,
 };
 
 pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
@@ -60,12 +63,11 @@ pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
 fn handlePutc(frame: *arch.irq.InterruptFrame) void {
     const char_to_print = @as(u8, @truncate(frame.rdi));
     kernel.kputc(char_to_print);
-    // Return the character printed in rax as a convention
     frame.rax = char_to_print;
 }
 
 fn handleGetc(frame: *arch.irq.InterruptFrame) void {
-    // This is a blocking call. The scheduler will handle yielding.
+    // This blocks...
     const char_read = drivers.keyboard.KeyboardBuffer.getc();
     frame.rax = char_read;
 }
@@ -186,7 +188,7 @@ fn handleThreadCreate(frame: *arch.irq.InterruptFrame) void {
             entry_fn,
             arg,
             current.is_kernel,
-            current.mapper, // Share address space for now
+            current.mapper, // Share address space for now... should like fix this
             current.owning_allocator,
             false,
             .NORMAL,
@@ -211,14 +213,11 @@ fn handleThreadJoin(frame: *arch.irq.InterruptFrame) void {
 fn handleExec(frame: *arch.irq.InterruptFrame) void {
     const path_ptr = frame.rdi;
     const args_ptr = frame.rsi;
-    _ = args_ptr; // Currently unused, but could be used for program arguments
+    _ = args_ptr;
 
-    // Convert C strings to Zig strings (simplified)
     const path = std.mem.span(@as([*:0]const u8, @ptrFromInt(path_ptr)));
 
-    const elf_loader = @import("elf_loader.zig");
 
-    // Replace current thread with new program
     elf_loader.loadAndRunProgram(path, null, false) catch |err| {
         std.log.err("Exec failed: {}", .{err});
         frame.rax = @intFromError(err);

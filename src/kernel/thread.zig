@@ -31,6 +31,8 @@ pub const Priority = enum(u8) {
     KERNEL = 4,
 };
 
+// TODO @(dleiferives,a798b266-084e-4cac-939c-7d6721f270af): should be set in arch
+// or something like that... ~#
 pub const ThreadContext = extern struct {
     // General purpose registers
     rax: u64,
@@ -262,8 +264,8 @@ pub const Thread = struct {
             );
         }
 
-pub fn exec(path: []const u8) !void {
-    return asm volatile ("int $128"
+    pub fn exec(path: []const u8) !void {
+        return asm volatile ("int $128"
         :
         : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.EXEC))),
           [path] "{rdi}" (path.ptr),
@@ -379,7 +381,6 @@ fn allocateUserStack(thread: *Thread) !void {
     // thread.user_stack = ptr[0..stack_size];
 }
 
-// Update setupInitialContext in thread.zig
 fn setupInitialContext(thread: *Thread) !void {
     // Set up stack pointers
     if (thread.is_kernel) {
@@ -513,6 +514,8 @@ pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFram
 
 
 
+// TODO @(dleiferives,ad3ea549-b9cc-4c76-923c-3a555961263f): should put these
+// inside of arch ~#
 // Context switching assembly functions
 pub extern fn saveContext(ctx: *ThreadContext) void;
 pub extern fn loadContext(ctx: *ThreadContext) noreturn;

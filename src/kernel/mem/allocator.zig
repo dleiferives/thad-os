@@ -68,37 +68,36 @@ pub const Header = packed struct {
         const aligned_ptr: [*]u8 = @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(data_ptr), alignment.toByteUnits()));
         const offset = @intFromPtr(aligned_ptr) - @intFromPtr(data_ptr);
 
-        // Calculate how much space we actually need (including alignment offset)
+        // Calculate how much space we actually need (with alignment)
         const space_needed = offset + size;
 
-        // Align the position for the next header to @sizeOf(Header) boundary
+        // Find next position
         const unaligned_remainder_pos = @intFromPtr(self.getDataPtr()) + space_needed;
         const aligned_remainder_pos = std.mem.alignForward(usize, unaligned_remainder_pos, @sizeOf(Header));
         const actual_space_used = aligned_remainder_pos - @intFromPtr(self.getDataPtr());
 
-        // Calculate remaining space after this allocation and header alignment
         const remaining_total_space = self.size - actual_space_used;
 
-        // If there's not enough space left for a meaningful block, use the whole block
+        // If there's not enough space... we use the whole thing
         if (remaining_total_space < @sizeOf(Header) + 8) {
             self.free = false;
             self.allocator_id = allocator_id;
             log_verbose.info("Using whole block: size={}, needed={}, allocator_id={}", .{self.size, space_needed, allocator_id});
-            return false; // No split occurred
+            return false;
         }
 
-        // Place the remainder header at the aligned position
+
         const new_header: *Header = @ptrFromInt(aligned_remainder_pos);
 
-        // Initialize the remainder header
+
         new_header.* = Header{
             .next = self.next,
             .size = @intCast(remaining_total_space - @sizeOf(Header)),
-            .allocator_id = 0, // Free block has no allocator
+            .allocator_id = 0, // Free block has no allocator...
             .free = true,
         };
 
-        // Update current header to point to remainder and mark as allocated
+
         self.next = new_header;
         self.size = @intCast(actual_space_used);
         self.allocator_id = allocator_id;
@@ -119,7 +118,6 @@ comptime {
     std.debug.assert(@sizeOf(Header) == 16);
 }
 
-// Internal allocator context for vtable functions
 const AllocatorContext = struct {
     tracker: *TrackedAllocator,
     id: u16,
@@ -207,7 +205,6 @@ pub const TrackedAllocator = struct {
     pub fn debugPrint(self: *TrackedAllocator) void {
         self.inner.debugPrint();
 
-        // Print allocation stats by ID
         log.info("=== Allocations by ID ===", .{});
         var checked_ids = std.AutoHashMap(u16, bool).init(self.allocator_for_contexts);
         defer checked_ids.deinit();
@@ -227,21 +224,18 @@ pub const TrackedAllocator = struct {
     pub fn tester(self: *TrackedAllocator) !void {
         log.info("Starting tracked allocator test!", .{});
 
-        // Create multiple allocators
         var alloc1 = try self.createAllocator();
         var alloc2 = try self.createAllocator();
 
         const std_alloc1 = alloc1.allocator();
         const std_alloc2 = alloc2.allocator();
 
-        // Test allocations with different IDs
         log.info("Testing allocations with different IDs...", .{});
 
         const bytes1 = try std_alloc1.alloc(u8, 100);
         const bytes2 = try std_alloc2.alloc(u8, 200);
         const bytes3 = try std_alloc1.alloc(u8, 150);
 
-        // Verify allocations
         for (bytes1, 0..) |*byte, i| {
             byte.* = @truncate(i);
         }
@@ -254,20 +248,17 @@ pub const TrackedAllocator = struct {
 
         self.debugPrint();
 
-        // Test freeing all allocations for one ID
         log.info("Freeing all allocations for ID {}...", .{alloc1.id});
         const freed_count = self.freeAllForId(alloc1.id);
         log.info("Freed {} allocations", .{freed_count});
 
         self.debugPrint();
 
-        // Test that alloc2's allocation is still valid
-        if (bytes2[0] != 100 or bytes2[199] != 43) { // 199 + 100 = 299, 299 % 256 = 43
+        if (bytes2[0] != 100 or bytes2[199] != 43) {
             log.err("Allocator 2's memory was corrupted!", .{});
             return error.MemoryCorruption;
         }
 
-        // Clean up remaining allocation
         std_alloc2.free(bytes2);
 
         log.info("Tracked allocator test passed!", .{});
@@ -307,7 +298,6 @@ pub const AllocatorWrapper = struct {
 
         log_verbose.info("Allocating {} bytes (rounded to {}) for ID {}", .{len, size, self.id});
 
-        // Try to coalesce free blocks first
         self.tracker.inner.coalesceFreeBLocks();
 
         if (self.tracker.inner.findFreeBlock(size, alignment)) |header| {
@@ -319,7 +309,7 @@ pub const AllocatorWrapper = struct {
             const data_ptr = header.getDataPtr();
             const aligned_ptr: [*]u8 = @ptrFromInt(std.mem.alignForward(usize, @intFromPtr(data_ptr), alignment.toByteUnits()));
 
-            // Zero out the memory
+            // sero it out
             @memset(aligned_ptr[0..len], 0);
 
             log_verbose.info("Allocated {} bytes at 0x{x} for ID {}", .{ len, @intFromPtr(aligned_ptr), self.id });
@@ -385,14 +375,12 @@ pub const AllocatorWrapper = struct {
                 header.allocator_id = 0;
                 log_verbose.info("Freed {} bytes at 0x{x} for ID {}", .{ buf.len, @intFromPtr(buf.ptr), self.id });
 
-                // Coalesce immediately after freeing
                 self.tracker.inner.coalesceFreeBLocks();
             }
         }
     }
 };
 
-// Keep the original FreeListAllocator for internal use
 const FreeListAllocator = struct {
     headers: ?*Header,
     start: usize,
@@ -460,7 +448,6 @@ const FreeListAllocator = struct {
             while (iter.next()) |header| {
                 if (!header.free) continue;
 
-                // Try to coalesce with next block
                 if (header.next) |next_header| {
                     if (next_header.free and header.isAdjacent(next_header)) {
                         header.size += @sizeOf(Header) + next_header.size;
@@ -468,7 +455,7 @@ const FreeListAllocator = struct {
                         self.total_blocks -= 1;
                         changed = true;
                         log_verbose.info("Coalesced blocks, new size: {}", .{header.size});
-                        break; // Restart iteration
+                        break;
                     }
                 }
             }

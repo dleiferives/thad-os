@@ -9,13 +9,13 @@ const mbr = @import("mbr.zig");
 // files is first_ino ~#
 
 pub const EXT2_MAGIC:u16 = 0xEF53;
-pub const EXT2_BAD_INODE:u32 = 0x0001; // bad inode
-pub const EXT2_ROOT_INODE:u32 = 0x0002; // root inode
-pub const EXT2_ACL_IDX_INODE:u32 = 0x0003; // ACL index inode
-pub const EXT2_ACL_DATA_INODE:u32 = 0x0004; // ACL data inode
-pub const EXT2_BOOT_LOADER_INODE:u32 = 0x0005; // boot loader inode
-pub const EXT2_UNDEL_DIR_INODE:u32 = 0x0006; // undelete directory inode
-pub const EXT2_BLOCK_GROUP_DESC_SIZE:u64 = 32; // size of block group descriptor in bytes
+pub const EXT2_BAD_INODE:u32 = 0x0001;
+pub const EXT2_ROOT_INODE:u32 = 0x0002;
+pub const EXT2_ACL_IDX_INODE:u32 = 0x0003;
+pub const EXT2_ACL_DATA_INODE:u32 = 0x0004;
+pub const EXT2_BOOT_LOADER_INODE:u32 = 0x0005;
+pub const EXT2_UNDEL_DIR_INODE:u32 = 0x0006;
+pub const EXT2_BLOCK_GROUP_DESC_SIZE:u64 = 32;
 
 pub const superblock = struct {
     inodes_count: u32,
@@ -794,7 +794,7 @@ pub const Ext2FilesystemIterator = struct {
             } else {
                 // Not a valid ext2 filesystem, continue to the next partition
                 std.log.info("Partition {any} on device {any} is not a valid ext2 filesystem.", .{ent, self.dev.?});
-                return self.next(); // Recursively call next to find the next filesystem
+                return self.next();
             }
 
         } else {
@@ -803,8 +803,7 @@ pub const Ext2FilesystemIterator = struct {
             self.dev = self.block_device_iter.next();
             self.partition_entry_iter = null;
             self.partition_entry = null;
-            return self.next(); // Recursively call next to find the next filesystem
-
+            return self.next();
         }
     }
 };

@@ -6,7 +6,7 @@ const ext2 = @import("ext2.zig");
 
 const log = std.log.scoped(.kernel_vfs);
 
-// POSIX file types and permissions
+// POSIX style file types and permissions
 pub const FileType = enum(u16) {
     UNKNOWN = 0,
     FIFO = 0x1000,
@@ -123,7 +123,6 @@ pub const VfsDirent = struct {
     pub const DT_SOCK = 12;
 };
 
-// VFS errors
 pub const VfsError = error{
     NotFound,
     PermissionDenied,
@@ -141,14 +140,11 @@ pub const VfsError = error{
     OutOfMemory,
 };
 
-// Forward declarations
 pub const VfsNode = struct {
-    // Node metadata
     name: []const u8,
     parent: ?*VfsNode,
     mount: *VfsMount,
 
-    // Reference counting
     ref_count: u32 = 1,
 
     // File operations (callbacks)
@@ -188,7 +184,6 @@ pub const VfsNodeVTable = struct {
     release: ?*const fn(node: *VfsNode) void = null,
 };
 
-// Context for readdir operations
 pub const ReaddirContext = struct {
     callback: *const fn(ctx: *ReaddirContext, dirent: *const VfsDirent) VfsError!void,
     user_data: ?*anyopaque = null,
@@ -199,7 +194,6 @@ pub const ReaddirContext = struct {
     }
 };
 
-// File descriptor structure
 pub const FileDescriptor = struct {
     fd: u32,
     node: *VfsNode,
@@ -207,7 +201,6 @@ pub const FileDescriptor = struct {
     flags: u32 = 0,
     next: ?*FileDescriptor = null,
 
-    // File descriptor flags
     pub const O_RDONLY = 0x0000;
     pub const O_WRONLY = 0x0001;
     pub const O_RDWR = 0x0002;
@@ -228,7 +221,6 @@ pub const FileDescriptor = struct {
     }
 };
 
-// Mount point structure
 pub const VfsMount = struct {
     mountpoint: []const u8,
     root_node: *VfsNode,
@@ -241,7 +233,6 @@ pub const VfsMount = struct {
     no_suid: bool = false,
 };
 
-// Per-thread file descriptor table
 pub const FdTable = struct {
     fds: [256]?*FileDescriptor = [_]?*FileDescriptor{null} ** 256,
     next_fd: u32 = 0,
@@ -313,7 +304,7 @@ pub const FdTable = struct {
     }
 };
 
-// Global VFS context
+// Global VFS context!
 pub const VfsContext = struct {
     root_node: ?*VfsNode = null,
     mounts: ?*VfsMount = null,
@@ -428,6 +419,9 @@ pub fn mount(mountpoint: []const u8, root_node: *VfsNode, fs_type: []const u8) V
 
 // VFS system calls
 
+// TODO @(dleiferives,e8e177be-94bf-4985-94b7-110ddf01054a): could use custom
+// style qualifiers -> change the type implicitly after calling open such that
+// causes a type error in the compiler in using code. like that thesis defense ~#
 pub fn vfs_open(path: []const u8, flags: u32) VfsError!u32 {
     const current_thread = thread.getCurrentThread() orelse {
         return VfsError.NotSupported;
@@ -593,8 +587,6 @@ pub fn vfs_readdir(fd: u32, callback: *const fn(dirent: *const VfsDirent, user_d
 
     return file_desc.node.vtable.readdir.?(file_desc.node, &readdir_ctx);
 }
-
-// Helper functions for filesystem implementations
 
 pub fn createNode(allocator: std.mem.Allocator, name: []const u8, vtable: *const VfsNodeVTable) VfsError!*VfsNode {
     const node = allocator.create(VfsNode) catch {
