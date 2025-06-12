@@ -20,6 +20,22 @@ pub inline fn outb(port: u16, value: u8) void {
     );
 }
 
+pub inline fn inw(port: u16) u16 {
+    return asm volatile ("inw %[port], %[result]"
+        : [result] "={al}" (-> u16),
+        : [port] "N{dx}" (port),
+    );
+}
+
+
+pub inline fn outw(port: u16, value: u16) void {
+    asm volatile ("outw %[value], %[port]"
+        :
+        : [value] "r" (value),
+          [port] "N{dx}" (port),
+    );
+}
+
 
 /// Halt the CPU until the next interrupt
 pub inline fn halt() void {

@@ -162,7 +162,6 @@ pub const AtaController = struct {
     devices: [4]DeviceInfo,
     allocator: std.mem.Allocator,
 
-    // Global mutex for ATA operations - replaces the worker thread
     operation_mutex: kernel.mutex.Mutex = .{},
 
     const Self = @This();
@@ -367,8 +366,6 @@ pub const AtaController = struct {
             log.err("No ATA devices detected on any channel", .{});
         }
     }
-
-    // Remove the worker thread startup function entirely
 
     fn identifyDevice(self: *Self, channel: Channel, drive: DriveSelect) !DeviceInfo {
         const ch_idx = @intFromEnum(channel);
@@ -596,7 +593,6 @@ pub const AtaController = struct {
         self.operation_mutex.lock();
         defer self.operation_mutex.unlock();
 
-        // Call the internal function directly - no more worker thread
         try self.readSectorsInternal(device_idx, lba, sector_count, buffer);
     }
 
@@ -620,7 +616,6 @@ pub const AtaController = struct {
         self.operation_mutex.lock();
         defer self.operation_mutex.unlock();
 
-        // Call the internal function directly - no more worker thread
         try self.writeSectorsInternal(device_idx, lba, sector_count, buffer);
     }
 
@@ -631,7 +626,6 @@ pub const AtaController = struct {
         self.operation_mutex.lock();
         defer self.operation_mutex.unlock();
 
-        // Call the internal function directly - no more worker thread
         try self.flushCacheInternal(device_idx);
     }
 
@@ -1111,7 +1105,6 @@ pub fn init() !void {
     try controller.initializeChannels();
     try controller.detectDevices();
 
-    // No more worker thread startup!
     ata_controller = controller;
 
     log.info("ATA driver initialized successfully (direct access mode)", .{});

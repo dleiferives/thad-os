@@ -376,6 +376,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
             log.info("Testing VFS operations", .{});
             testVfsOperations() catch |err| {
                 log.err("VFS tests failed: {}", .{err});
+                @panic("MD5 checksum test failed");
             };
 
 
@@ -405,15 +406,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
 
     // If no ext2 found, create simple root
     if (!mounted_ext2) {
-        log.info("No ext2 filesystem found, creating simple root", .{});
-        simple_fs.createSimpleRoot(state.getKernelAllocator() orelse @panic("no allocator")) catch |err| {
-            log.err("Failed to create simple root: {}", .{err});
-            @panic("Failed to create simple root");
-        };
-
-        testVfsOperations() catch |err| {
-            log.err("VFS tests failed: {}", .{err});
-        };
+        @panic("No ext2 filesystem found, cannot mount root");
 
     }
 
@@ -920,7 +913,7 @@ fn testVfsOperations() !void {
         log.err("Failed to open '{s}': {}", .{ grub_cfg_path, err });
         log.info("--- File read test skipped ---", .{});
         log.info("=== VFS Tests Complete ===", .{});
-        return;
+        return error.FileReadTestSkipped;
     };
     defer vfs.vfs_close(file_fd) catch {};
 
