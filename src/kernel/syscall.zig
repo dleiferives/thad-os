@@ -192,6 +192,7 @@ fn handleThreadCreate(frame: *arch.irq.InterruptFrame) void {
             current.owning_allocator,
             false,
             .NORMAL,
+            true,
         ) catch {
             frame.rax = 0;
             return;

@@ -21,8 +21,8 @@ pub const std_options: std.Options = .{
     // This is the logging function used by `std.log`.
     .logFn = kernel.logger,
     .log_level = .debug,
-    // .page_size_min = 4096, // 4 KiB
-    // .page_size_max = 2 * 1024 * 1024, // 2 MiB
+    .page_size_min = 4096, // 4 KiB
+    .page_size_max = 1024 * 1024 * 1024 , // 1Gb
 };
 
 // Using the linker to sneakily move some asm into language code

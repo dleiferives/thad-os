@@ -20,6 +20,7 @@ pub const BlockDevType = enum(u8) {
 pub const BlockDevError = error{
     DeviceError,
     InvalidBlock,
+    InvalidRequest,
     NotReady,
     Timeout,
     OutOfMemory,
@@ -45,7 +46,7 @@ pub const DataSlice = struct {
         // read out of the first block
         const buffer = try allocator.alloc(u8,dev.blk_size);
         defer allocator.free(buffer);
-        try dev.readBlock(block_start, buffer.ptr);
+        try dev.readBlock(block_start, buffer);
 
         // first block data
         var index: usize = 0;
@@ -57,7 +58,7 @@ pub const DataSlice = struct {
         // read the rest of the blocks
         for (block_start + 1 .. block_end) |blk_num| blc_l: {
             if (index >= size) break;
-            try dev.readBlock(blk_num, buffer.ptr);
+            try dev.readBlock(blk_num, buffer);
             for (buffer) |byte| {
                 if (index >= size) break :blc_l;
                 data[index] = byte;
@@ -81,18 +82,28 @@ pub const DataSlice = struct {
 
 pub const BlockDev = struct {
     tot_length: u64,
-    read_block: *const fn (dev: *BlockDev, blk_num: u64, dst: *anyopaque) BlockDevError!void,
+    read_block: *const fn (dev: *BlockDev, blk_num: u64, dst: *anyopaque, dst_len:u64) BlockDevError!void,
+    read_blocks: *const fn (dev: *BlockDev, blk_num: u64, count: u64, dst: *anyopaque, dst_len:u64) BlockDevError!void,
     blk_size: u32,
     dev_type: BlockDevType,
     name: []const u8,
     fs_type: u8,
     next: ?*BlockDev,
 
-    pub fn readBlock(self: *BlockDev, blk_num: u64, dst: *anyopaque) BlockDevError!void {
+    pub fn readBlock(self: *BlockDev, blk_num: u64, dst: []u8) BlockDevError!void {
         if (blk_num >= self.tot_length / self.blk_size) {
             return BlockDevError.InvalidBlock;
         }
-        return self.read_block(self, blk_num, dst);
+        return self.read_block(self, blk_num, @ptrCast(dst.ptr),dst.len);
+    }
+
+
+    pub fn readBlocks(self: *BlockDev, blk_num: u64, count: u64, dst: []u8) BlockDevError!void {
+        if (blk_num >= self.tot_length / self.blk_size) {
+            std.log.err("Invalid block number: {d} for device: {s}", .{blk_num, self.name});
+            return BlockDevError.InvalidBlock;
+        }
+        return self.read_blocks(self, blk_num, count, @ptrCast(dst.ptr), dst.len);
     }
 
     pub fn createDataSlice(

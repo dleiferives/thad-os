@@ -103,6 +103,8 @@ pub const Thread = struct {
     parent_tid: ?u64,
     exit_code: ?i32,
     owning_allocator: std.mem.Allocator,
+    creating_thread: bool = false,
+    creating_thread_mapper: *mem.Mapper = undefined,
 
     // Entry point for user threads
     entry_point: ?*const fn (*anyopaque) callconv(.C) i32,
@@ -154,6 +156,7 @@ pub const Thread = struct {
         allocator: std.mem.Allocator,
         is_main: bool,
         priority: Priority,
+        create_stack: bool,
     ) !*Thread {
         const thread = try allocator.create(Thread);
         errdefer allocator.destroy(thread);
@@ -183,11 +186,15 @@ pub const Thread = struct {
         };
 
         // Allocate kernel stack
-        try allocateKernelStack(thread, slot);
+        if (create_stack) {
+            try allocateKernelStack(thread, slot);
+            log.info("allocated kernel stack",.{});
+        } else {
+            log.info("not allocating kernel stack",.{});
+        }
         // note that we will be moving off the boot stack for the main thread
         // at this point!
 
-        log.info("allocated kernel stack",.{});
 
         // Allocate user stack if needed
         if (!is_kernel) {

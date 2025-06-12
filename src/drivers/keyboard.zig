@@ -174,8 +174,8 @@ fn scancodeSet2ToKey(sc: u8, e0_prefix: bool) Key {
             0x51 => .E0_PageDown,
             0x52 => .E0_Insert,
             0x53 => .E0_Delete,
-            0x5B => .E0_LeftGui,
-            0x5C => .E0_RightGui,
+            0x5B => .E0_LeftSuper,
+            0x5C => .E0_RightSuper,
             0x5D => .E0_Apps,
             0x5E => .E0_Power,
             0x5F => .E0_Sleep,
@@ -354,8 +354,8 @@ pub const Ps2KeyboardDevice = struct {
                 .E0_RightCtrl => self.right_ctrl_pressed = key_pressed,
                 .LeftAlt => self.left_alt_pressed = key_pressed,
                 .E0_RightAlt => self.right_alt_pressed = key_pressed,
-                .E0_LeftGui => self.left_super_pressed = key_pressed,
-                .E0_RightGui => self.right_super_pressed = key_pressed,
+                .E0_LeftSuper => self.left_super_pressed = key_pressed,
+                .E0_RightSuper => self.right_super_pressed = key_pressed,
                 .CapsLock => if (key_pressed) {
                     self.caps_lock_on = !self.caps_lock_on;
                     self.updateLeds() catch |err| {

@@ -596,6 +596,22 @@ pub const Ex2Filesystem = struct {
         return block_slice;
     }
 
+
+    pub fn getBlockRaw(self: *Self, block:u64, data: []u8) !void{
+        const block_addr = self.first_block_addr + (block * self.superblock.block_size);
+        const block_num = @as(u64, block_addr / self.dev.blk_size);
+        try self.dev.readBlock(block_num, data);
+    }
+
+
+    // TODO @(dleiferives,0dc80541-38c9-48de-a000-efbc0d1f7bdd): add conversion
+    // between block sizes... ~#
+    pub fn getBlocksRaw(self: *Self, block:u64, count: u64, data: []u8) !void{
+        const block_addr = self.first_block_addr + (block * self.superblock.block_size);
+        const block_num = @as(u64, block_addr / self.dev.blk_size);
+        try self.dev.readBlocks(block_num, count * self.dev.blk_size / self.superblock.block_size, data);
+    }
+
     pub fn getInode(self: *Self, inode_num: u64) !inode_table_entry{
         if (inode_num == 0) return std.mem.zeroes(inode_table_entry);
         if (inode_num > self.superblock.inodes_count) return Ex2Error.InodeNotFound;
@@ -629,7 +645,7 @@ pub const Ex2Filesystem = struct {
 
     }
 
-    pub fn getInodeBlockID(self: *Self, inode: inode_table_entry, block: u32) !u32 {
+    pub inline fn getInodeBlockID(self: *Self, inode: inode_table_entry, block: u32) !u32 {
         const indirect_block_size = self.superblock.block_size / @sizeOf(u32);
         const double_indirect_block_size = indirect_block_size * indirect_block_size;
         if(block < 12) {
@@ -677,12 +693,13 @@ pub const Ex2Filesystem = struct {
         return block_id;
     }
 
-    pub fn readInodeBlock(self: *Self, inode: inode_table_entry, block: u32) !DataSlice {
+    pub inline fn readInodeBlock(self: *Self, inode: inode_table_entry, block: u32) !DataSlice {
         const block_id = try self.getInodeBlockID(inode, block);
         if (block_id == 0) return error.NotFound; // No such block
         // std.log.info("Reading inode block {d} from inode {any}", .{block_id, inode});
         return try self.getBlock(block_id);
     }
+
 
     pub fn printDirectoryEntries(self: *Self, inode: inode_table_entry, depth: u64) !void {
         if (!inode.mode.directory) {
@@ -779,7 +796,7 @@ pub const Ext2FilesystemIterator = struct {
         if (self.partition_entry_iter == null) {
             // Initialize partition entry iterator for the current device
             std.log.info("Initializing partition entry iterator for device: {any}", .{self.dev.?});
-            self.partition_entry_iter = mbr.PartitionEntryIterator.init(self.dev.?);
+            self.partition_entry_iter = mbr.PartitionEntryIterator.init(self.dev.?) orelse return null;
         }
         if (self.partition_entry_iter.?.next()) |ent| {
             const fs_n = Ex2Filesystem.init(self.dev.?, ent, self.allocator) catch |err| {

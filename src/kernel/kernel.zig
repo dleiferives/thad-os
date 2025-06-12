@@ -16,6 +16,7 @@ const vfs = @import("vfs.zig");
 const simple_fs = @import("simple_fs.zig");
 const elf = @import("elf.zig");
 const elf_loader = @import("elf_loader.zig");
+const builtin = @import("builtin");
 
 const log = std.log.scoped(.kernel);
 
@@ -201,6 +202,7 @@ pub fn main() !void {
         state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
         true,
         .KERNEL,
+        true,
     ) catch |err| {
         log.err("Failed to create kernel thread: {}", .{err});
         return err;
@@ -218,6 +220,7 @@ pub fn main() !void {
             state.getKernelAllocator() orelse return error.KernelHeapNotInitialized,
             false,
             .KERNEL,
+            true,
         ) catch |err| {
             log.err("Failed to create kernel thread: {}", .{err});
             return err;
@@ -374,6 +377,13 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
             testVfsOperations() catch |err| {
                 log.err("VFS tests failed: {}", .{err});
             };
+
+
+            testMd5Checksum() catch |err| {
+                log.err("MD5 checksum test failed: {}", .{err});
+                @panic("MD5 checksum test failed");
+            };
+
         }
 
         // fs.printFullTree() catch |err| {
@@ -383,7 +393,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
 
 
         log.info("Testing ELF program loading...", .{});
-        elf_loader.loadAndRunProgram("/bin/program", null, false) catch |err| {
+        elf_loader.loadAndRunProgram("/bin/program", null, true) catch |err| {
             log.err("Failed to load ELF program: {}", .{err});
         };
 
@@ -404,6 +414,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         testVfsOperations() catch |err| {
             log.err("VFS tests failed: {}", .{err});
         };
+
     }
 
     allowed_scopes = MAP_TEST_SCOPES[0..];
@@ -460,6 +471,19 @@ pub const Kernel = struct {
     kernel_heap: ?mem.allocator.TrackedAllocator = null,
     kernel_allocator: ?mem.allocator.AllocatorWrapper = null,
     scheduler: ?scheduler.Scheduler = null,
+
+    pub fn switchMap(self: *Kernel) !void {
+        if (!self.initilized.mem_manager) {
+            log.err("Memory manager not initialized, cannot switch map", .{});
+            return error.MemoryManagerNotInitialized;
+        }
+        if (self.mem_manager.mapper) |mapper| {
+            try mapper.switchMap();
+        } else {
+            log.err("Mapper not initialized, cannot switch map", .{});
+            return error.MapperNotInitialized;
+        }
+    }
 
     pub inline fn mem_layout_init(self: *Kernel) !void {
         if (self.initilized.mem_layout) {
@@ -559,7 +583,8 @@ pub const Kernel = struct {
 };
 
 pub var state: Kernel = undefined;
-
+var panic_buffer: [1024]u8 = undefined;
+var panic_allocator: std.mem.Allocator = undefined;
 /// helpers
 /// NOTE: logging is going to have error levels basically
 /// debug = everything
@@ -568,6 +593,8 @@ pub var state: Kernel = undefined;
 /// error = errors
 pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
     _ = trace;
+    var tmp_aloc = std.heap.FixedBufferAllocator.init(&panic_buffer);
+    panic_allocator = tmp_aloc.allocator();
     print("\n================ PANIC ================\n", .{});
     print("Message: {s}\n", .{msg});
     if (return_address) |addr| {
@@ -575,8 +602,6 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, return_address: ?
     } else {
         print("No return address available.\n", .{});
     }
-    // std.debug.dumpCurrentStackTrace();
-
     // Halt forever
     // TODO @(dleiferives,1ad01822-7fbc-4e0d-b952-2ba435ba3b9f): Make panic
     // relaunch the kernel! ~#
@@ -665,7 +690,7 @@ pub const ALL_SCOPES = [_]LogScope{
     // .drivers_ps2,
     // .drivers_ps2_verbose,
     // .drivers_keyboard,
-    // .drivers_ata,
+    .drivers_ata,
     // .drivers_ata_verbose,
     // .drivers_keyboard_verbose,
     // .drivers_uart_verbose,
@@ -899,6 +924,8 @@ fn testVfsOperations() !void {
     };
     defer vfs.vfs_close(file_fd) catch {};
 
+
+
     log.info("Successfully opened '{s}' as fd {}", .{ grub_cfg_path, file_fd });
 
     var file_stat: vfs.VfsStat = undefined;
@@ -955,6 +982,105 @@ fn testVfsOperations() !void {
 
     log.info("=== VFS Tests Complete ===", .{});
 }
+
+fn testMd5Checksum() !void {
+    log.info("=== Testing MD5 Checksum ===", .{});
+
+    const kernel_path = "/boot/kernel";
+    const block_size = 4096; // 4KB blocks
+
+    // Open the kernel file
+    const file_fd = vfs.vfs_open(
+        kernel_path,
+        vfs.FileDescriptor.O_RDONLY,
+    ) catch |err| {
+        log.err("Failed to open '{s}': {}", .{ kernel_path, err });
+        log.info("--- MD5 test skipped ---", .{});
+        return;
+    };
+    defer vfs.vfs_close(file_fd) catch {};
+
+    log.info("Successfully opened '{s}' for MD5 calculation", .{kernel_path});
+
+    // Get file size
+    var file_stat: vfs.VfsStat = undefined;
+    vfs.vfs_stat(kernel_path, &file_stat) catch |err| {
+        log.err("Failed to stat '{s}': {}", .{ kernel_path, err });
+        return;
+    };
+
+    log.info("File size: {} bytes", .{file_stat.st_size});
+
+    // Allocate buffer for reading blocks
+    var read_buffer = (state.getKernelAllocator() orelse return).alloc(
+        u8,
+        block_size,
+    ) catch |err| {
+        log.err("Failed to allocate buffer for MD5 calculation: {}", .{err});
+        return;
+    };
+    defer (state.getKernelAllocator() orelse @panic("Could not")).free(read_buffer);
+
+    // Initialize MD5 hasher
+    var md5_hasher = std.crypto.hash.Md5.init(.{});
+    var total_bytes_read: usize = 0;
+    var block_count: usize = 0;
+
+    log.info("Reading file in {}KB blocks...", .{block_size / 1024});
+
+    // Read file in blocks and update MD5
+    while (true) {
+        const bytes_read = vfs.vfs_read(file_fd, read_buffer) catch |err| {
+            log.err("Failed to read block from '{s}': {}", .{ kernel_path, err });
+            return;
+        };
+
+        if (bytes_read == 0) {
+            // End of file reached
+            break;
+        }
+
+        // Update MD5 with this block
+        md5_hasher.update(read_buffer[0..bytes_read]);
+        total_bytes_read += bytes_read;
+        block_count = total_bytes_read / 1024;
+
+        // Log progress every 256 blocks (1MB if using 4KB blocks)
+        const mb_processed = total_bytes_read / (1024 * 1024);
+        log.info("Processed {} blocks ({} MB)...", .{ block_count, mb_processed });
+    }
+
+    // Finalize MD5 hash
+    var md5_digest: [16]u8 = undefined;
+    md5_hasher.final(&md5_digest);
+
+    // Convert MD5 hash to hex string
+    var md5_hex: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(md5_hex[0..], "{}", .{std.fmt.fmtSliceHexLower(&md5_digest)}) catch |err| {
+        log.err("Failed to format MD5 hash: {}", .{err});
+        return;
+    };
+
+    log.info("--- MD5 Calculation Complete ---", .{});
+    log.info("File: {s}", .{kernel_path});
+    log.info("Total bytes processed: {}", .{total_bytes_read});
+    log.info("Blocks read: {}", .{block_count});
+    log.info("MD5 checksum: {s}", .{md5_hex});
+
+    // Verify we read the expected amount
+    if (total_bytes_read != file_stat.st_size) {
+        log.err("Warning: Expected {} bytes but read {} bytes", .{
+            file_stat.st_size, total_bytes_read
+        });
+    } else {
+        log.info("Successfully processed entire file", .{});
+    }
+
+    log.info("=== MD5 Test Complete ===", .{});
+}
+
+
+pub const root = @import("root");
 
 pub fn kputc(ch: u8) void {
     // possibly disable interrupts?

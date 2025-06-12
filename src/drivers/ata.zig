@@ -1,5 +1,5 @@
 // src/drivers/ata.zig
-// This took so damn long lmao
+// Direct access version with mutex synchronization
 const std = @import("std");
 const arch = @import("arch");
 const kernel = @import("kernel");
@@ -18,7 +18,6 @@ pub const AtaError = error{
     ControllerNotFound,
     UnsupportedDevice,
     DeviceBusy,
-    QueueFull,
     InvalidParameters,
 };
 
@@ -126,103 +125,6 @@ pub const Channel = enum(u1) {
     SECONDARY = 1,
 };
 
-pub const IoRequestType = enum {
-    read,
-    write,
-    flush,
-};
-
-pub const IoRequest = struct {
-    request_type: IoRequestType,
-    device_idx: usize,
-    lba: u64,
-    sector_count: u16,
-    buffer: []u8,
-    completed: bool = false,
-    error_code: ?AtaError = null,
-    waiting_thread: ?*kernel.thread.Thread = null,
-    next: ?*IoRequest = null,
-};
-
-pub const IoQueue = struct {
-    head: ?*IoRequest = null,
-    tail: ?*IoRequest = null,
-    count: u32 = 0,
-    max_queue_size: u32 = 64,
-    mutex: kernel.mutex.Mutex = .{},
-    blocked_threads: kernel.thread_queue.ThreadQueue = .{},
-
-    pub fn init(max_size: u32) IoQueue {
-        return .{ .max_queue_size = max_size };
-    }
-
-    pub fn enqueue(self: *IoQueue, request: *IoRequest) AtaError!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.count >= self.max_queue_size) {
-            return AtaError.QueueFull;
-        }
-
-        request.next = null;
-        request.waiting_thread = kernel.thread.getCurrentThread();
-
-        if (self.tail) |tail| {
-            tail.next = request;
-        } else {
-            self.head = request;
-        }
-        self.tail = request;
-        self.count += 1;
-
-        log_verbose.info("Enqueued I/O request: type={}, device={}, LBA={}, count={}", .{
-            request.request_type, request.device_idx, request.lba, request.sector_count
-        });
-    }
-
-    pub fn dequeue(self: *IoQueue) ?*IoRequest {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.head) |head| {
-            self.head = head.next;
-            if (self.head == null) {
-                self.tail = null;
-            }
-            head.next = null;
-            self.count -= 1;
-
-            log_verbose.info("Dequeued I/O request: type={}, device={}, LBA={}", .{
-                head.request_type, head.device_idx, head.lba
-            });
-
-            return head;
-        }
-        return null;
-    }
-
-    pub fn completeRequest(self: *IoQueue, request: *IoRequest, error_code: ?AtaError) void {
-        _ = self;
-        request.completed = true;
-        request.error_code = error_code;
-
-        // Unblock waiting thread
-        if (request.waiting_thread) |thread| {
-            log_verbose.info("Completing I/O request and unblocking thread {}", .{thread.tid});
-            thread.state = .READY;
-            if (kernel.state.scheduler) |sched| {
-                sched.addThread(thread) catch {
-                    log.err("Failed to re-add thread {} to scheduler", .{thread.tid});
-                };
-            }
-        }
-    }
-
-    pub fn isEmpty(self: *IoQueue) bool {
-        return self.head == null;
-    }
-};
-
 // Channel registers
 pub const ChannelRegs = struct {
     base: u16, // I/O base port
@@ -231,7 +133,6 @@ pub const ChannelRegs = struct {
     irq: u8, // IRQ number
     enabled: bool = false,
     processing_request: bool = false,
-    current_request: ?*IoRequest = null,
 };
 
 pub const DeviceInfo = struct {
@@ -259,10 +160,10 @@ pub const DeviceInfo = struct {
 pub const AtaController = struct {
     channels: [2]ChannelRegs,
     devices: [4]DeviceInfo,
-    io_queue: IoQueue,
     allocator: std.mem.Allocator,
-    worker_thread: ?*kernel.thread.Thread = null,
-    shutdown_requested: bool = false,
+
+    // Global mutex for ATA operations - replaces the worker thread
+    operation_mutex: kernel.mutex.Mutex = .{},
 
     const Self = @This();
 
@@ -279,7 +180,6 @@ pub const AtaController = struct {
                 .channel = .PRIMARY,
                 .drive = .LITCH,
             }} ** 4,
-            .io_queue = IoQueue.init(64),
             .allocator = allocator,
         };
 
@@ -293,13 +193,6 @@ pub const AtaController = struct {
 
     pub fn deinit(self: *Self) void {
         log.info("Shutting down ATA controller", .{});
-
-        self.shutdown_requested = true;
-
-        if (self.worker_thread) |worker| {
-            // looping waiting for worker to finish
-            _ = worker;
-        }
 
         // Unregister IRQ handlers
         for (0..2) |ch_idx| {
@@ -475,72 +368,7 @@ pub const AtaController = struct {
         }
     }
 
-    pub fn startWorkerThread(self: *Self) !void {
-        log_verbose.info("Starting ATA I/O worker thread", .{});
-
-        self.worker_thread = try kernel.thread.Thread.create(
-            &ioWorkerThread,
-            self,
-            true, // kernel thread
-            kernel.state.mem_manager.mapper.?,
-            self.allocator,
-            false,
-            .NORMAL,
-        );
-
-        if (kernel.state.scheduler) |sched| {
-            try sched.addThread(self.worker_thread.?);
-            log.info("ATA I/O worker thread started successfully", .{});
-        } else {
-            return AtaError.DeviceError;
-        }
-    }
-
-    fn ioWorkerThread(arg: *anyopaque) callconv(.C) i32 {
-        const self: *AtaController = @ptrCast(@alignCast(arg));
-        log_verbose.info("ATA I/O worker thread started", .{});
-
-        while (!self.shutdown_requested) {
-            if (self.io_queue.dequeue()) |request| {
-                log_verbose.info("Processing I/O request: type={}, device={}, LBA={}", .{
-                    request.request_type, request.device_idx, request.lba
-                });
-
-                const error_code = self.processIoRequest(request);
-                self.io_queue.completeRequest(request, error_code);
-            } else {
-                // No requests! lets yeild
-                kernel.thread.Thread.yield();
-            }
-        }
-
-        log_verbose.info("ATA I/O worker thread shutting down", .{});
-        return 0;
-    }
-
-    fn processIoRequest(self: *Self, request: *IoRequest) ?AtaError {
-        switch (request.request_type) {
-            .read => {
-                return self.readSectorsInternal(
-                    request.device_idx,
-                    request.lba,
-                    request.sector_count,
-                    request.buffer
-                );
-            },
-            .write => {
-                return self.writeSectorsInternal(
-                    request.device_idx,
-                    request.lba,
-                    request.sector_count,
-                    request.buffer
-                );
-            },
-            .flush => {
-                return self.flushCacheInternal(request.device_idx);
-            },
-        }
-    }
+    // Remove the worker thread startup function entirely
 
     fn identifyDevice(self: *Self, channel: Channel, drive: DriveSelect) !DeviceInfo {
         const ch_idx = @intFromEnum(channel);
@@ -702,7 +530,6 @@ pub const AtaController = struct {
         const model_len = std.mem.indexOfScalar(u8, &device_info.model, 0) orelse device_info.model.len;
         log_verbose.info("Device identification complete - model: {s}", .{device_info.model[0..model_len]});
 
-
         // Step 11: Fucking celebrate
         return device_info;
     }
@@ -729,6 +556,7 @@ pub const AtaController = struct {
         block_dev.* = block_device.BlockDev{
             .tot_length = device.size,
             .read_block = ataReadBlock,
+            .read_blocks = ataReadBlocks,
             .blk_size = 512,
             .dev_type = .MASS_STORAGE,
             .name = name_copy,
@@ -747,35 +575,29 @@ pub const AtaController = struct {
         log.info("Block device {s} registered successfully", .{name_copy});
     }
 
+    // Direct access functions - no more queuing!
     pub fn readSector(self: *Self, device_idx: usize, lba: u64, buffer: []u8) !void {
         return self.readSectors(device_idx, lba, 1, buffer);
     }
 
     pub fn readSectors(self: *Self, device_idx: usize, lba: u64, sector_count: u16, buffer: []u8) !void {
-        if (buffer.len < sector_count * 512) {
+        if (buffer.len < @as(u64, @intCast(sector_count)) * 512) {
             log.err("Buffer too small for sector read: {} bytes (need {})", .{
                 buffer.len, sector_count * 512
             });
             return AtaError.InvalidParameters;
         }
 
-        var request = IoRequest{
-            .request_type = .read,
-            .device_idx = device_idx,
-            .lba = lba,
-            .sector_count = sector_count,
-            .buffer = buffer,
-        };
+        log_hyper_verbose.info("Direct read: device={}, LBA={}, sectors={}", .{
+            device_idx, lba, sector_count
+        });
 
-        try self.io_queue.enqueue(&request);
+        // Acquire the operation mutex - this blocks if another thread is using ATA
+        self.operation_mutex.lock();
+        defer self.operation_mutex.unlock();
 
-        while (!request.completed) {
-            kernel.thread.Thread.yield();
-        }
-
-        if (request.error_code) |err| {
-            return err;
-        }
+        // Call the internal function directly - no more worker thread
+        try self.readSectorsInternal(device_idx, lba, sector_count, buffer);
     }
 
     pub fn writeSector(self: *Self, device_idx: usize, lba: u64, buffer: []const u8) !void {
@@ -790,46 +612,30 @@ pub const AtaController = struct {
             return AtaError.InvalidParameters;
         }
 
-        var request = IoRequest{
-            .request_type = .write,
-            .device_idx = device_idx,
-            .lba = lba,
-            .sector_count = sector_count,
-            .buffer = @constCast(buffer),
-        };
+        log_hyper_verbose.info("Direct write: device={}, LBA={}, sectors={}", .{
+            device_idx, lba, sector_count
+        });
 
-        try self.io_queue.enqueue(&request);
+        // Acquire the operation mutex - this blocks if another thread is using ATA
+        self.operation_mutex.lock();
+        defer self.operation_mutex.unlock();
 
-        while (!request.completed) {
-            kernel.thread.Thread.yield();
-        }
-
-        if (request.error_code) |err| {
-            return err;
-        }
+        // Call the internal function directly - no more worker thread
+        try self.writeSectorsInternal(device_idx, lba, sector_count, buffer);
     }
 
     pub fn flushCache(self: *Self, device_idx: usize) !void {
-        var request = IoRequest{
-            .request_type = .flush,
-            .device_idx = device_idx,
-            .lba = 0,
-            .sector_count = 0,
-            .buffer = &[_]u8{},
-        };
+        log_hyper_verbose.info("Direct flush: device={}", .{device_idx});
 
-        try self.io_queue.enqueue(&request);
+        // Acquire the operation mutex - this blocks if another thread is using ATA
+        self.operation_mutex.lock();
+        defer self.operation_mutex.unlock();
 
-        while (!request.completed) {
-            kernel.thread.Thread.yield();
-        }
-
-        if (request.error_code) |err| {
-            return err;
-        }
+        // Call the internal function directly - no more worker thread
+        try self.flushCacheInternal(device_idx);
     }
 
-    fn readSectorsInternal(self: *Self, device_idx: usize, lba: u64, sector_count: u16, buffer: []u8) ?AtaError {
+    fn readSectorsInternal(self: *Self, device_idx: usize, lba: u64, sector_count: u16, buffer: []u8) !void {
         const device = &self.devices[device_idx];
         if (!device.exists) {
             log.err("Attempted to read from non-existent device {}", .{device_idx});
@@ -852,23 +658,18 @@ pub const AtaController = struct {
             const buffer_offset = sector_offset * 512;
             const sector_buffer = buffer[buffer_offset..buffer_offset + 512];
 
-            if (self.readSectorInternal(device_idx, current_lba, sector_buffer)) |err| {
-                return err;
-            }
+            try self.readSectorInternal(device_idx, current_lba, sector_buffer);
         }
 
         log_verbose.info("Successfully read {} sectors from device {}", .{ sector_count, device_idx });
-        return null;
     }
 
-    fn readSectorInternal(self: *Self, device_idx: usize, lba: u64, buffer: []u8) ?AtaError {
+    fn readSectorInternal(self: *Self, device_idx: usize, lba: u64, buffer: []u8) !void {
         const device = &self.devices[device_idx];
         const channel = device.channel;
         const drive = device.drive;
 
-        if (self.setupLbaCommand(channel, drive, lba, 1, true)) |err| {
-            return err;
-        }
+        try self.setupLbaCommand(channel, drive, lba, 1, true);
 
         const command = if (device.supports_lba48 and lba >= 0x10000000)
             AtaCommand.READ_PIO_EXT
@@ -878,20 +679,23 @@ pub const AtaController = struct {
         log_verbose.info("Sending read command: {}", .{command});
         self.writeDataPort(channel, .COMMAND, @intFromEnum(command));
 
-        if (self.waitForDrq(channel)) |err| {
-            return err;
-        }
+        try self.waitForDrq(channel);
 
         log_verbose.info("Reading 512 bytes of sector data", .{});
         const buffer_u16: [*]u16 = @ptrCast(@alignCast(buffer.ptr));
-        for (0..256) |i| {
-            buffer_u16[i] = self.readData(channel);
-        }
 
-        return null;
+        const ch_idx = @intFromEnum(channel);
+        const port = self.channels[ch_idx].base;
+
+        for (0..256) |i| {
+            buffer_u16[i] = asm volatile ("inw %[port], %[result]"
+                : [result] "={ax}" (-> u16),
+                : [port] "N{dx}" (port),
+            );
+        }
     }
 
-    fn writeSectorsInternal(self: *Self, device_idx: usize, lba: u64, sector_count: u16, buffer: []u8) ?AtaError {
+    fn writeSectorsInternal(self: *Self, device_idx: usize, lba: u64, sector_count: u16, buffer: []const u8) !void {
         const device = &self.devices[device_idx];
         if (!device.exists) {
             log.err("Attempted to write to non-existent device {}", .{device_idx});
@@ -906,7 +710,6 @@ pub const AtaController = struct {
             sector_count, lba, device_idx, ch_idx, @intFromEnum(drive)
         });
 
-        // amke busy
         self.channels[ch_idx].processing_request = true;
         defer self.channels[ch_idx].processing_request = false;
 
@@ -915,24 +718,18 @@ pub const AtaController = struct {
             const buffer_offset = sector_offset * 512;
             const sector_buffer = buffer[buffer_offset..buffer_offset + 512];
 
-            if (self.writeSectorInternal(device_idx, current_lba, sector_buffer)) |err| {
-                return err;
-            }
+            try self.writeSectorInternal(device_idx, current_lba, sector_buffer);
         }
 
         log_verbose.info("Successfully wrote {} sectors to device {}", .{ sector_count, device_idx });
-        return null;
     }
 
-    fn writeSectorInternal(self: *Self, device_idx: usize, lba: u64, buffer: []const u8) ?AtaError {
+    fn writeSectorInternal(self: *Self, device_idx: usize, lba: u64, buffer: []const u8) !void {
         const device = &self.devices[device_idx];
         const channel = device.channel;
         const drive = device.drive;
 
-        // Select dirv ena LBA
-        if (self.setupLbaCommand(channel, drive, lba, 1, false)) |err| {
-            return err;
-        }
+        try self.setupLbaCommand(channel, drive, lba, 1, false);
 
         const command = if (device.supports_lba48 and lba >= 0x10000000)
             AtaCommand.WRITE_PIO_EXT
@@ -942,9 +739,7 @@ pub const AtaController = struct {
         log_verbose.info("Sending write command: {}", .{command});
         self.writeDataPort(channel, .COMMAND, @intFromEnum(command));
 
-        if (self.waitForDrq(channel)) |err| {
-            return err;
-        }
+        try self.waitForDrq(channel);
 
         log_hyper_verbose.info("Writing 512 bytes of sector data", .{});
         const buffer_u16: [*]const u16 = @ptrCast(@alignCast(buffer.ptr));
@@ -952,14 +747,10 @@ pub const AtaController = struct {
             self.writeData(channel, buffer_u16[i]);
         }
 
-        if (self.waitForCompletion(channel)) |err| {
-            return err;
-        }
-
-        return null;
+        try self.waitForCompletion(channel);
     }
 
-    fn flushCacheInternal(self: *Self, device_idx: usize) ?AtaError {
+    fn flushCacheInternal(self: *Self, device_idx: usize) !void {
         const device = &self.devices[device_idx];
         if (!device.exists) {
             return AtaError.NoDevice;
@@ -967,7 +758,7 @@ pub const AtaController = struct {
 
         if (!device.supports_write_cache) {
             log_verbose.info("Device {} does not support write cache - flush not needed", .{device_idx});
-            return null;
+            return;
         }
 
         const channel = device.channel;
@@ -987,17 +778,14 @@ pub const AtaController = struct {
         log_verbose.info("Sending cache flush command: {}", .{command});
         self.writeDataPort(channel, .COMMAND, @intFromEnum(command));
 
-        if (self.waitForCompletion(channel)) |err| {
-            return err;
-        }
+        try self.waitForCompletion(channel);
 
         log_verbose.info("Cache flush completed for device {}", .{device_idx});
-        return null;
     }
 
-    fn setupLbaCommand(self: *Self, channel: Channel, drive: DriveSelect, lba: u64, sector_count: u16, is_read: bool) ?AtaError {
+    fn setupLbaCommand(self: *Self, channel: Channel, drive: DriveSelect, lba: u64, sector_count: u16, is_read: bool) !void {
         _ = is_read;
-        const device_idx: u4 = (@as(u4,@intFromEnum(channel)) * 2) + @intFromEnum(drive);
+        const device_idx: u4 = (@as(u4, @intFromEnum(channel)) * 2) + @intFromEnum(drive);
         const device = &self.devices[device_idx];
 
         // Select drive
@@ -1038,11 +826,9 @@ pub const AtaController = struct {
             self.writeDataPort(channel, .LBA_MID, @truncate(lba >> 8));
             self.writeDataPort(channel, .LBA_HIGH, @truncate(lba >> 16));
         }
-
-        return null;
     }
 
-    fn waitForDrq(self: *Self, channel: Channel) ?AtaError {
+    fn waitForDrq(self: *Self, channel: Channel) !void {
         log_verbose.info("Waiting for DRQ on channel {}", .{@intFromEnum(channel)});
 
         var timeout: u32 = 100000;
@@ -1059,12 +845,11 @@ pub const AtaController = struct {
 
             if (status.drq) {
                 log_verbose.info("DRQ set - ready for data transfer", .{});
-                return null;
+                return;
             }
 
             if (!status.bsy and status.rdy) {
                 // Device is ready but no DRQ - might be an error
-                // I really do not know what to do here
                 continue;
             }
         }
@@ -1073,7 +858,7 @@ pub const AtaController = struct {
         return AtaError.Timeout;
     }
 
-    fn waitForCompletion(self: *Self, channel: Channel) ?AtaError {
+    fn waitForCompletion(self: *Self, channel: Channel) !void {
         log_verbose.info("Waiting for completion on channel {}", .{@intFromEnum(channel)});
 
         var timeout: u32 = 100000;
@@ -1090,7 +875,7 @@ pub const AtaController = struct {
 
             if (!status.bsy and status.rdy and !status.drq) {
                 log_verbose.info("Operation completed successfully", .{});
-                return null;
+                return;
             }
         }
 
@@ -1181,7 +966,6 @@ pub const AtaController = struct {
     fn writeData(self: *Self, channel: Channel, data: u16) void {
         const ch_idx = @intFromEnum(channel);
         const port = self.channels[ch_idx].base;
-        // TODO @(dleiferives,733a845b-2fca-47cd-9b30-a7387777b43c): add to cpu ~#
         asm volatile ("outw %[data], %[port]"
             :
             : [data] "{ax}" (data),
@@ -1233,7 +1017,7 @@ pub const AtaController = struct {
 // Global controller instance (for callbacks)
 var ata_controller: ?*AtaController = null;
 
-fn ataReadBlock(dev: *block_device.BlockDev, blk_num: u64, dst: *anyopaque) block_device.BlockDevError!void {
+fn ataReadBlock(dev: *block_device.BlockDev, blk_num: u64, dst: *anyopaque, dst_len: u64) block_device.BlockDevError!void {
     log_hyper_verbose.info("Block device read request: device={s}, block={}, dst=0x{X}", .{
         dev.name, blk_num, @intFromPtr(dst)
     });
@@ -1254,8 +1038,47 @@ fn ataReadBlock(dev: *block_device.BlockDev, blk_num: u64, dst: *anyopaque) bloc
         return block_device.BlockDevError.DeviceError;
     };
 
-    const buffer: [*]u8 = @ptrCast(dst);
-    ata_controller.?.readSector(device_idx, blk_num, buffer[0..512]) catch |err| {
+    const buffer_ptr: [*]u8 = @ptrCast(dst);
+    const buffer = buffer_ptr[0..dst_len];
+    ata_controller.?.readSector(device_idx, blk_num, buffer) catch |err| {
+        log.err("ATA sector read failed: {}", .{err});
+        return block_device.BlockDevError.DeviceError;
+    };
+
+    log_hyper_verbose.info("Block device read completed successfully", .{});
+}
+
+fn ataReadBlocks(dev: *block_device.BlockDev, blk_num: u64, count: u64, dst: *anyopaque, dst_len: u64) block_device.BlockDevError!void {
+    log_hyper_verbose.info("Block device read request: device={s}, block={}, dst=0x{X}", .{
+        dev.name, blk_num, @intFromPtr(dst)
+    });
+
+    if (ata_controller == null) {
+        log.err("ATA controller not initialized for block read", .{});
+        return block_device.BlockDevError.DeviceError;
+    }
+
+    // find blk id
+    const device_idx: usize = blk: {
+        for (0..4) |i| {
+            if (ata_controller.?.devices[i].exists and ata_controller.?.devices[i].block_device == dev) {
+                break :blk i;
+            }
+        }
+        log.err("Block device not found in ATA controller", .{});
+        return block_device.BlockDevError.DeviceError;
+    };
+
+    const raw_size: u64 = count * dev.blk_size;
+    if (dst_len < raw_size) {
+        log.err("Destination buffer too small: {} bytes (need {})", .{ dst_len, raw_size });
+        return block_device.BlockDevError.InvalidRequest;
+    }
+    const sectors: u16 = @intCast(raw_size / 512);
+
+    const buffer_ptr: [*]u8 = @ptrCast(dst);
+    const buffer = buffer_ptr[0..dst_len];
+    ata_controller.?.readSectors(device_idx, blk_num, sectors, buffer) catch |err| {
         log.err("ATA sector read failed: {}", .{err});
         return block_device.BlockDevError.DeviceError;
     };
@@ -1287,11 +1110,11 @@ pub fn init() !void {
     try controller.detectController();
     try controller.initializeChannels();
     try controller.detectDevices();
-    try controller.startWorkerThread();
 
+    // No more worker thread startup!
     ata_controller = controller;
 
-    log.info("ATA driver initialized successfully", .{});
+    log.info("ATA driver initialized successfully (direct access mode)", .{});
 }
 
 pub fn deinit() void {

@@ -133,9 +133,7 @@ pub const SimpleNode = struct {
         try ctx.emit(&dirent);
 
         if (node.parent) |parent| {
-            const parent_node: *Self = @ptrCast(
-                @alignCast(parent.private_data.?)
-            );
+            const parent_node: *Self = @ptrCast(@alignCast(parent.private_data.?));
             dirent = vfs.VfsDirent{
                 .d_ino = parent_node.inode_number,
                 .d_type = vfs.VfsDirent.DT_DIR,
@@ -199,9 +197,7 @@ pub const SimpleNode = struct {
 
             var offset: usize = 0;
             while (offset < block_slice.data.len) {
-                const entry = ext2.directory_entry.fromBytes(
-                    block_slice.data[offset..]
-                );
+                const entry = ext2.directory_entry.fromBytes(block_slice.data[offset..]);
                 if (entry.rec_len == 0) break;
 
                 if (entry.inode != 0) { // Valid entry
@@ -299,9 +295,7 @@ pub const SimpleNode = struct {
 
             var offset: usize = 0;
             while (offset < block_slice.data.len) {
-                const entry = ext2.directory_entry.fromBytes(
-                    block_slice.data[offset..]
-                );
+                const entry = ext2.directory_entry.fromBytes(block_slice.data[offset..]);
                 if (entry.rec_len == 0) break;
 
                 if (entry.inode != 0 and std.mem.eql(u8, entry.getName(), name)) {
@@ -332,71 +326,100 @@ pub const SimpleNode = struct {
         return vfs.VfsError.NotFound;
     }
 
-    fn read(
-        node: *vfs.VfsNode,
-        offset: u64,
-        buffer: []u8,
-    ) vfs.VfsError!usize {
-        const self: *Self = @ptrCast(@alignCast(node.private_data.?));
+fn read(
+    node: *vfs.VfsNode,
+    offset: u64,
+    buffer: []u8,
+) vfs.VfsError!usize {
+    const self: *Self = @ptrCast(@alignCast(node.private_data.?));
 
-        if (self.is_directory) {
-            return vfs.VfsError.IsDirectory;
-        }
-
-        const ext2_fs = self.ext2_fs orelse return vfs.VfsError.NotSupported;
-        const inode = self.ext2_inode orelse return vfs.VfsError.NotSupported;
-
-        // Check for read beyond EOF
-        if (offset >= self.file_size) {
-            return 0;
-        }
-
-        const bytes_to_read = @min(buffer.len, self.file_size - offset);
-        if (bytes_to_read == 0) {
-            return 0;
-        }
-
-        const block_size = ext2_fs.superblock.block_size;
-        var bytes_read_so_far: usize = 0;
-        var current_offset_in_file = offset;
-
-        while (bytes_read_so_far < bytes_to_read) {
-            const current_block_index: u32 = @intCast(
-                current_offset_in_file / block_size
-            );
-            const offset_in_block: usize = @intCast(
-                current_offset_in_file % block_size
-            );
-
-            var block_slice = ext2_fs.readInodeBlock(
-                inode,
-                current_block_index,
-            ) catch |err| {
-                log.err(
-                    "Failed to read inode block {}: {}",
-                    .{ current_block_index, err },
-                );
-                return vfs.VfsError.IoError;
-            };
-            defer block_slice.free();
-
-            const bytes_to_copy_from_this_block = @min(
-                @as(usize, @intCast(block_size)) - offset_in_block,
-                bytes_to_read - bytes_read_so_far,
-            );
-
-            const src_slice = block_slice.data[offset_in_block .. offset_in_block +
-                bytes_to_copy_from_this_block];
-            const dest_slice = buffer[bytes_read_so_far .. bytes_read_so_far +
-                bytes_to_copy_from_this_block];
-            @memcpy(dest_slice, src_slice);
-
-            bytes_read_so_far += bytes_to_copy_from_this_block;
-            current_offset_in_file += bytes_to_copy_from_this_block;
-        }
-
-        return bytes_read_so_far;
+    if (self.is_directory) {
+        return vfs.VfsError.IsDirectory;
     }
+
+    const ext2_fs = self.ext2_fs orelse return vfs.VfsError.NotSupported;
+    const inode = self.ext2_inode orelse return vfs.VfsError.NotSupported;
+
+    // Check for read beyond EOF
+    if (offset >= self.file_size) {
+        return 0;
+    }
+
+    const bytes_to_read = @min(buffer.len, self.file_size - offset);
+    if (bytes_to_read == 0) {
+        return 0;
+    }
+
+    const block_size = ext2_fs.superblock.block_size;
+    var bytes_read_so_far: usize = 0;
+    var current_offset_in_file = offset;
+
+    // Read in larger chunks to reduce overhead
+    while (bytes_read_so_far < bytes_to_read) {
+        const current_block_index: u32 = @intCast(current_offset_in_file / block_size);
+        const offset_in_block: usize = @intCast(current_offset_in_file % block_size);
+
+        // Calculate how many consecutive blocks we can read
+        const remaining_bytes = bytes_to_read - bytes_read_so_far;
+
+        // If we're reading from the start of a block and have multiple blocks to read
+        if (offset_in_block == 0 and remaining_bytes >= block_size) {
+            // Calculate consecutive blocks
+            var consecutive_blocks: u32 = 1;
+            const max_blocks = @min(
+                remaining_bytes / block_size,
+                inode.blocks_count - current_block_index
+            );
+
+            if (max_blocks > 1) {
+                const first_block_id = ext2_fs.getInodeBlockID(inode, current_block_index) catch |err| {
+                    log.err("Failed to get block ID for inode {}: {}", .{ inode, err });
+                    return vfs.VfsError.IoError;
+                };
+
+                // Check for consecutive blocks
+                for (1..@min(max_blocks, 64)) |i| { // Limit to 64 blocks (32KB) at once
+                    const next_block_id = ext2_fs.getInodeBlockID(inode, current_block_index + @as(u32, @intCast(i))) catch break;
+                    if (next_block_id != first_block_id + i) break;
+                    consecutive_blocks += 1;
+                }
+
+                // Read multiple blocks at once
+                const bytes_to_read_now = consecutive_blocks * block_size;
+                const dest_slice = buffer[bytes_read_so_far .. bytes_read_so_far + @as(usize, bytes_to_read_now)];
+
+                ext2_fs.getBlocksRaw(first_block_id, consecutive_blocks, dest_slice) catch {
+                    return vfs.VfsError.IoError;
+                };
+
+                bytes_read_so_far += bytes_to_read_now;
+                current_offset_in_file += bytes_to_read_now;
+                continue;
+            }
+        }
+
+        // Fall back to single block read for partial blocks or non-consecutive blocks
+        var block_slice = ext2_fs.readInodeBlock(inode, current_block_index) catch |err| {
+            log.err("Failed to read inode block {}: {}", .{ current_block_index, err });
+            return vfs.VfsError.IoError;
+        };
+        defer block_slice.free();
+
+        const bytes_to_copy_from_this_block = @min(
+            block_size - offset_in_block,
+            bytes_to_read - bytes_read_so_far,
+        );
+
+        const src_slice = block_slice.data[offset_in_block .. offset_in_block + bytes_to_copy_from_this_block];
+        const dest_slice = buffer[bytes_read_so_far .. bytes_read_so_far + bytes_to_copy_from_this_block];
+        @memcpy(dest_slice, src_slice);
+
+        bytes_read_so_far += bytes_to_copy_from_this_block;
+        current_offset_in_file += bytes_to_copy_from_this_block;
+    }
+
+    return bytes_read_so_far;
+}
 
     fn release(node: *vfs.VfsNode) void {
         const self: *Self = @ptrCast(@alignCast(node.private_data.?));

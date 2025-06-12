@@ -1,11 +1,10 @@
 const std = @import("std");
-const kernel= @import("kernel");
+const kernel = @import("kernel");
 const cpu = @import("cpu.zig");
 const pf_log = std.log.scoped(.irq_page_fault);
 const irq_log = std.log.scoped(.irq);
 const thread = kernel.thread;
 const syscall = kernel.syscall;
-
 
 /// Interrupt vector enum, just a helper lol
 pub const Vector = enum(u8) {
@@ -32,10 +31,22 @@ pub const Vector = enum(u8) {
     control_protection = 21,
 
     // Hardware IRQs (32-47)
-    irq0 = 32, irq1 = 33, irq2 = 34, irq3 = 35,
-    irq4 = 36, irq5 = 37, irq6 = 38, irq7 = 39,
-    irq8 = 40, irq9 = 41, irq10 = 42, irq11 = 43,
-    irq12 = 44, irq13 = 45, irq14 = 46, irq15 = 47,
+    irq0 = 32,
+    irq1 = 33,
+    irq2 = 34,
+    irq3 = 35,
+    irq4 = 36,
+    irq5 = 37,
+    irq6 = 38,
+    irq7 = 39,
+    irq8 = 40,
+    irq9 = 41,
+    irq10 = 42,
+    irq11 = 43,
+    irq12 = 44,
+    irq13 = 45,
+    irq14 = 46,
+    irq15 = 47,
 
     // System calls
 
@@ -51,11 +62,8 @@ pub const Vector = enum(u8) {
     }
 
     pub fn fromValue(value: u8) ?Vector {
-        switch(value) {
-            0,1,2,3,4,5,6,7,8,10,11,12,13,14,
-            16,17,18,19,20,21,32,33,34,35,36,
-            37,38,39,40,41,42,43,44,45,46,47,
-            128,129 => return @enumFromInt(value),
+        switch (value) {
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 128, 129 => return @enumFromInt(value),
             else => return null,
         }
     }
@@ -75,13 +83,27 @@ pub const Vector = enum(u8) {
 // contexts... I shouldn't have two ~#
 pub const InterruptFrame = extern struct {
     // Segment registers
-    gs: u64, fs: u64, es: u64, ds: u64,
+    gs: u64,
+    fs: u64,
+    es: u64,
+    ds: u64,
 
     // General registers
-    r15: u64, r14: u64, r13: u64, r12: u64,
-    r11: u64, r10: u64, r9: u64, r8: u64,
-    rbp: u64, rdi: u64, rsi: u64, rdx: u64,
-    rcx: u64, rbx: u64, rax: u64,
+    r15: u64,
+    r14: u64,
+    r13: u64,
+    r12: u64,
+    r11: u64,
+    r10: u64,
+    r9: u64,
+    r8: u64,
+    rbp: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    rcx: u64,
+    rbx: u64,
+    rax: u64,
 
     // Interrupt data
     vector: u64,
@@ -95,7 +117,7 @@ pub const InterruptFrame = extern struct {
     ss: u64,
 
     // helper
-    pub fn toThreadContext(self: @This()) thread.ThreadContext{
+    pub fn toThreadContext(self: @This()) thread.ThreadContext {
         return .{
             .rax = self.rax,
             .rbx = self.rbx,
@@ -128,7 +150,6 @@ pub const InterruptFrame = extern struct {
 
 // The interrupt handler function!
 pub const HandlerFn = *const fn (frame: *InterruptFrame) void;
-
 
 pub const idt = struct {
     const Gate = packed struct {
@@ -186,7 +207,11 @@ pub const idt = struct {
     }
 
     pub fn load() void {
-        asm volatile ("lidt (%[idtr])" : : [idtr] "r" (&idtr) : "memory");
+        asm volatile ("lidt (%[idtr])"
+            :
+            : [idtr] "r" (&idtr),
+            : "memory"
+        );
     }
 
     // Import stub addresses from assembly
@@ -288,7 +313,6 @@ const pic = struct {
 pub const dispatcher = struct {
     var handlers: [256]?HandlerFn = [_]?HandlerFn{null} ** 256;
 
-
     // Called from assembly!
     export fn interrupt_dispatcher(frame: *InterruptFrame) callconv(.C) void {
         const vector_n = Vector.fromValue(@intCast(frame.vector));
@@ -330,8 +354,6 @@ pub const dispatcher = struct {
     pub fn unregister(vector: Vector) void {
         handlers[vector.toValue()] = null;
     }
-
-
 };
 
 // TODO @(dleiferives,e195c28e-a228-4da6-94b1-98e103549202): add a logger scope ~#
@@ -346,7 +368,7 @@ pub const exceptions = struct {
 
     fn pageFault(frame: *InterruptFrame) void {
         const fault_addr = asm volatile ("mov %%cr2, %[result]"
-            : [result] "=r" (-> u64)
+            : [result] "=r" (-> u64),
         );
 
         const present = (frame.error_code & 1) != 0;
@@ -365,38 +387,64 @@ pub const exceptions = struct {
         if (!present) {
             // TODO @(dleiferives,d84fdf12-0708-41a7-98e1-f3d3c83ec957): update in
             // threading rewrite to get mapper from the current thread! ~#
-            const kernel_state = kernel.state;
-            if (kernel_state.initilized.mem_manager) {
-                if (kernel_state.mem_manager.mapper) |mapper_ptr| {
-                    pf_log.err("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
-                    var mapper = @constCast(mapper_ptr);
-                    if (mapper.handleDemandPageFault(fault_addr)) |success| {
-                        if (success) {
-                            pf_log.info("Successfully handled demand page fault at 0x{X:0>16}", .{fault_addr});
-                            pf_log.info("Continuing execution after handling page fault", .{});
-                            return; // Successfully handled, continue execution
-                        } else {
-                            pf_log.err("Failed to handle demand page fault at 0x{X:0>16}", .{fault_addr});
-                            asm volatile("cli; hlt");
-                            return;
-                        }
-                    } else |err| {
-                        // TODO
-                        // @(dleiferives,b45808dd-3874-4253-aed1-a34a791684b6):
-                        // upgrade this to fault out the program that is calling.
-                        // if its in the kernel... well the kernel really should
-                        // not be running out of space. could use swap or
-                        // something. at the end of the day I think that I will
-                        // just make it such that the heap will not overallocate
-                        // (ie. limit the heap to the nmber of free pages.) ~#
-                        irq_log.err("Error handling demand page fault: {}", .{err});
+
+            if (thread.getCurrentThread()) |t| {
+                var mapper_ptr = t.mapper;
+                if (t.creating_thread) {
+                    mapper_ptr = t.creating_thread_mapper;
+                }
+                pf_log.err("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
+                var mapper = @constCast(mapper_ptr);
+                if (mapper.handleDemandPageFault(fault_addr)) |success| {
+                    if (success) {
+                        pf_log.info("Successfully handled demand page fault at 0x{X:0>16}", .{fault_addr});
+                        pf_log.info("Continuing execution after handling page fault", .{});
+                        return; // Successfully handled, continue execution
+                    } else {
+                        pf_log.err("Failed to handle demand page fault at 0x{X:0>16}", .{fault_addr});
+                        asm volatile ("cli; hlt");
+                        return;
                     }
+                } else |err| {
+                    // TODO
+                    // @(dleiferives,b45808dd-3874-4253-aed1-a34a791684b6):
+                    // upgrade this to fault out the program that is calling.
+                    // if its in the kernel... well the kernel really should
+                    // not be running out of space. could use swap or
+                    // something. at the end of the day I think that I will
+                    // just make it such that the heap will not overallocate
+                    // (ie. limit the heap to the nmber of free pages.) ~#
+                    irq_log.err("Error handling demand page fault: {}", .{err});
+                }
+            } else if (kernel.state.mem_manager.mapper) |mapper_ptr| {
+                pf_log.err("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
+                var mapper = @constCast(mapper_ptr);
+                if (mapper.handleDemandPageFault(fault_addr)) |success| {
+                    if (success) {
+                        pf_log.info("Successfully handled demand page fault at 0x{X:0>16}", .{fault_addr});
+                        pf_log.info("Continuing execution after handling page fault", .{});
+                        return; // Successfully handled, continue execution
+                    } else {
+                        pf_log.err("Failed to handle demand page fault at 0x{X:0>16}", .{fault_addr});
+                        asm volatile ("cli; hlt");
+                        return;
+                    }
+                } else |err| {
+                    // TODO
+                    // @(dleiferives,b45808dd-3874-4253-aed1-a34a791684b6):
+                    // upgrade this to fault out the program that is calling.
+                    // if its in the kernel... well the kernel really should
+                    // not be running out of space. could use swap or
+                    // something. at the end of the day I think that I will
+                    // just make it such that the heap will not overallocate
+                    // (ie. limit the heap to the nmber of free pages.) ~#
+                    irq_log.err("Error handling demand page fault: {}", .{err});
                 }
             }
         }
 
         pf_log.err("  Fault Address: 0x{X:0>16}", .{fault_addr});
-        pf_log.err("UNHANDLED PAGE FAULT - System halted",.{});
+        pf_log.err("UNHANDLED PAGE FAULT - System halted", .{});
         asm volatile ("cli; hlt");
     }
 
@@ -407,7 +455,7 @@ pub const exceptions = struct {
 
     fn doubleFault(frame: *InterruptFrame) void {
         formatException("Double Fault", frame);
-        std.log.err("SYSTEM HALTED",.{});
+        std.log.err("SYSTEM HALTED", .{});
         asm volatile ("cli; hlt");
     }
 
@@ -424,7 +472,6 @@ pub const exceptions = struct {
         // std.log.debug("syscall handler",.{});
         syscall.handleSyscall(frame);
     }
-
 
     pub fn init() void {
         dispatcher.register(.divide_error, genericException("Divide Error"));
@@ -449,10 +496,9 @@ pub const exceptions = struct {
         dispatcher.register(.control_protection, genericException("Control Protection"));
     }
 
-    pub fn initThreading() void{
+    pub fn initThreading() void {
         dispatcher.register(.syscall, syscallHandler);
     }
-
 };
 
 // TODO @(dleiferives,f5e5ee61-e726-4315-82e5-e7f4c815b2eb): add a logger scope ~#
@@ -460,7 +506,7 @@ pub const irq = struct {
     var current_controller: Controller = pic.controller;
 
     pub fn init() !void {
-        std.log.info("Initializing IRQ system...",.{});
+        std.log.info("Initializing IRQ system...", .{});
         idt.init();
         disable();
         idt.setupStubs();
@@ -484,7 +530,7 @@ pub const irq = struct {
 
     pub fn isEnabled() bool {
         const flags = asm volatile ("pushfq; popq %[flags]"
-            : [flags] "=r" (-> u64)
+            : [flags] "=r" (-> u64),
         );
         return (flags & (1 << 9)) != 0;
     }
@@ -506,7 +552,7 @@ pub const irq = struct {
 
         const mask_port: u8 = if (irq_num < 8) 0x21 else 0xA1;
         const current_mask = cpu.inb(mask_port);
-        std.log.info("IRQ {} mask register 0x{X}: 0x{X:0>2}", .{irq_num, mask_port, current_mask});
+        std.log.info("IRQ {} mask register 0x{X}: 0x{X:0>2}", .{ irq_num, mask_port, current_mask });
     }
 
     pub fn unregisterIrq(irq_num: u8) !void {

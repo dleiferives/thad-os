@@ -57,6 +57,7 @@ pub export fn PROC_create_kthread(entry_point: *const fn (*anyopaque) callconv(.
         kernel.state.getKernelAllocator().?,
         false, // not the main thread
         .NORMAL,
+        true,
     ) catch |err| {
         std.log.err("Failed to create kernel thread: {s}", .{@errorName(err)});
         return 0;
