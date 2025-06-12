@@ -521,6 +521,9 @@ pub const Ex2Filesystem = struct {
     /// this is computed from the superblock
     block_groups: []block_group_desc,
 
+    // Block Cache!
+    cache: kernel.cache.Cache(u64,DataSlice,&DataSlice.destroy),
+
     pub const Self = @This();
 
     /// Will return null if the filesystem is not a valid ext2 filesystem.
@@ -538,6 +541,7 @@ pub const Ex2Filesystem = struct {
             .block_groups = undefined,
             .first_data_block_addr = undefined,
             .first_block_addr = undefined,
+            .cache = kernel.cache.Cache(u64, DataSlice, &DataSlice.destroy).init(allocator, 64),
         };
         errdefer self.deinit();
 
@@ -589,10 +593,17 @@ pub const Ex2Filesystem = struct {
     /// Returns an error if the block is out of bounds or the buffer is too small.
     /// or if there was trouble with memory
     pub fn getBlock(self: *Self, block:u64) !DataSlice{
+        // if (self.cache.get(block)) |slice| {
+        //     // std.log.info("cache hit for block {d}", .{block});
+        //     return slice;
+        // }
         const block_addr = self.first_block_addr + (block * self.superblock.block_size);
-
         // std.log.info("getting block {d} at address {d}", .{block, block_addr});
         const block_slice = try self.dev.createDataSlice(self.allocator, block_addr, self.superblock.block_size);
+        // block_slice.cached = true;
+        // self.cache.put(block, block_slice) catch {
+        //     block_slice.cached = false;
+        // };
         return block_slice;
     }
 
@@ -645,31 +656,31 @@ pub const Ex2Filesystem = struct {
 
     }
 
-    pub inline fn getInodeBlockID(self: *Self, inode: inode_table_entry, block: u32) !u32 {
+    pub inline fn getInodeBlockID(self: *Self, inode: inode_table_entry, block_index: u32) !u32 {
         const indirect_block_size = self.superblock.block_size / @sizeOf(u32);
         const double_indirect_block_size = indirect_block_size * indirect_block_size;
-        if(block < 12) {
-            return inode.blocks[block]; // Direct block
-        } else if (block < 12 + indirect_block_size) {
+        if(block_index < 12) {
+            return inode.blocks[block_index]; // Direct block
+        } else if (block_index < 12 + indirect_block_size) {
             // Single indirect block
             const indirect_block = inode.indirect_blocks;
             if (indirect_block == 0) return error.NotFound; // No indirect block
             var indirect_slice = try self.getBlock(indirect_block);
             defer indirect_slice.free();
-            const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[(block - 12) * 4 .. (block - 12 + 1) * 4]));
+            const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[(block_index - 12) * 4 .. (block_index - 12 + 1) * 4]));
             return block_id;
-        } else if (block < 12 + indirect_block_size + double_indirect_block_size) {
+        } else if (block_index < 12 + indirect_block_size + double_indirect_block_size) {
             // Double indirect block
             const double_indirect_block = inode.double_indirect_blocks;
             if (double_indirect_block == 0) return error.NotFound; // No double indirect block
             var double_indirect_slice = try self.getBlock(double_indirect_block);
             defer double_indirect_slice.free();
-            const indirect_index = (block - 12 - indirect_block_size) / indirect_block_size;
+            const indirect_index = (block_index - 12 - indirect_block_size) / indirect_block_size;
             const indirect_block_id = @as(u32, std.mem.bytesToValue(u32, double_indirect_slice.data[indirect_index * 4 .. (indirect_index + 1) * 4]));
             if (indirect_block_id == 0) return error.NotFound; // No indirect block
             var indirect_slice = try self.getBlock(indirect_block_id);
             defer indirect_slice.free();
-            const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[((block - 12 - indirect_block_size) % indirect_block_size) * 4 .. ((block - 12 - indirect_block_size) % indirect_block_size + 1) * 4]));
+            const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[((block_index - 12 - indirect_block_size) % indirect_block_size) * 4 .. ((block_index - 12 - indirect_block_size) % indirect_block_size + 1) * 4]));
             return block_id;
         }
 
@@ -678,18 +689,18 @@ pub const Ex2Filesystem = struct {
         if (triple_indirect_block == 0) return error.NotFound; // No triple indirect block
         var triple_indirect_slice = try self.getBlock(triple_indirect_block);
         defer triple_indirect_slice.free();
-        const double_index = (block - 12 - indirect_block_size - double_indirect_block_size) / double_indirect_block_size;
+        const double_index = (block_index - 12 - indirect_block_size - double_indirect_block_size) / double_indirect_block_size;
         const double_indirect_block_id = @as(u32, std.mem.bytesToValue(u32, triple_indirect_slice.data[double_index * 4 .. (double_index + 1) * 4]));
         if (double_indirect_block_id == 0) return error.NotFound; // No double indirect block
         var double_indirect_slice = try self.getBlock(double_indirect_block_id);
         defer double_indirect_slice.free();
-        const indirect_index = (block - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size / indirect_block_size;
+        const indirect_index = (block_index - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size / indirect_block_size;
         const indirect_block_id = @as(u32, std.mem.bytesToValue(u32, double_indirect_slice.data[indirect_index * 4 .. (indirect_index + 1) * 4]));
         if (indirect_block_id == 0) return error.NotFound; // No indirect block
         // Read the block from the indirect block
         var indirect_slice = try self.getBlock(indirect_block_id);
         defer indirect_slice.free();
-        const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[((block - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size) * 4 .. ((block - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size + 1) * 4]));
+        const block_id = @as(u32, std.mem.bytesToValue(u32, indirect_slice.data[((block_index - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size) * 4 .. ((block_index - 12 - indirect_block_size - double_indirect_block_size) % double_indirect_block_size + 1) * 4]));
         return block_id;
     }
 

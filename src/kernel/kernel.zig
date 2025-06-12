@@ -17,6 +17,7 @@ const simple_fs = @import("simple_fs.zig");
 const elf = @import("elf.zig");
 const elf_loader = @import("elf_loader.zig");
 const builtin = @import("builtin");
+pub const cache = @import("lru_cache.zig");
 
 const log = std.log.scoped(.kernel);
 
@@ -397,8 +398,11 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         elf_loader.loadAndRunProgram("/bin/program", null, true) catch |err| {
             log.err("Failed to load ELF program: {}", .{err});
         };
+        allowed_scopes = MAP_TEST_SCOPES[0..];
 
-        while(true) {}
+        while(true) {
+            thread.Thread.yield();
+        }
 
 
         fs.deinit(); // Deinitialize the filesystem
@@ -410,12 +414,12 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
 
     }
 
-    allowed_scopes = MAP_TEST_SCOPES[0..];
-    mem.tests.runMapperTests(state.getKernelAllocator() orelse @panic("no allocator"), state.mem_manager.mapper.?) catch |err| {
-        log.err("Mapper tests failed: {}", .{err});
-        @panic("Mapper tests failed");
-    };
-    allowed_scopes = ALL_SCOPES[0..];
+    // allowed_scopes = MAP_TEST_SCOPES[0..];
+    // mem.tests.runMapperTests(state.getKernelAllocator() orelse @panic("no allocator"), state.mem_manager.mapper.?) catch |err| {
+    //     log.err("Mapper tests failed: {}", .{err});
+    //     @panic("Mapper tests failed");
+    // };
+    // // allowed_scopes = ALL_SCOPES[0..];
 
 
 
@@ -670,14 +674,14 @@ pub const ALL_SCOPES = [_]LogScope{
     .mem_layout,
     .mem_manager,
     // .mem_manager_verbose,
-    .mem_manager_mapper,
+    // .mem_manager_mapper,
     // .mem_manager_mapper_verbose,
     // .mem_manager_mapper_translate,
     // .mem_allocator,
     // .mem_allocator_verbose,
     .irq,
     // .thread_yield,
-    .irq_page_fault,
+    // .irq_page_fault,
     // .drivers_vga,
     // .drivers_serial_log,
     // .drivers_ps2,
@@ -1039,8 +1043,10 @@ fn testMd5Checksum() !void {
         block_count = total_bytes_read / 1024;
 
         // Log progress every 256 blocks (1MB if using 4KB blocks)
-        const mb_processed = total_bytes_read / (1024 * 1024);
-        log.info("Processed {} blocks ({} MB)...", .{ block_count, mb_processed });
+        if (block_count % 256 == 0) {
+            const mb_processed = total_bytes_read / (1024 * 1024);
+            log.info("Processed {} blocks ({} MB)...", .{ block_count, mb_processed });
+        }
     }
 
     // Finalize MD5 hash

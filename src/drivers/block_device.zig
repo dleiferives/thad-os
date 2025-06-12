@@ -32,6 +32,7 @@ pub const DataSlice = struct {
     start: usize = 0,
     end: usize = 0,
     valid: bool = true,
+    cached: bool = false,
 
     pub fn create(dev: *BlockDev, allocator: std.mem.Allocator, start: usize, size: usize) !DataSlice {
         const data = try allocator.alloc(u8, size);
@@ -75,6 +76,17 @@ pub const DataSlice = struct {
     }
 
     pub fn free(self: *DataSlice) void {
+        if (!self.valid) {
+            @panic("DataSlice already freed");
+        }
+        if (self.cached) {
+            return; // Do not free cached slices
+        }
+        self.alloc.free(self.data);
+        self.valid = false;
+    }
+
+    pub fn destroy(self: *DataSlice) void {
         self.alloc.free(self.data);
         self.valid = false;
     }
@@ -84,11 +96,19 @@ pub const BlockDev = struct {
     tot_length: u64,
     read_block: *const fn (dev: *BlockDev, blk_num: u64, dst: *anyopaque, dst_len:u64) BlockDevError!void,
     read_blocks: *const fn (dev: *BlockDev, blk_num: u64, count: u64, dst: *anyopaque, dst_len:u64) BlockDevError!void,
+    // TODO @(dleiferives,07f290fa-45bc-4c8b-a0b0-19d57e3a13f1): add writing... ~#
     blk_size: u32,
     dev_type: BlockDevType,
     name: []const u8,
     fs_type: u8,
     next: ?*BlockDev,
+    // TODO @(dleiferives,2d198cc6-0032-4596-8460-a40427498e2d): I like having the
+    // block dev not having an allocator or allocated memory. But this would be a
+    // good addition I think that I'm going to put it in the ata and in the ext2
+    // levels but this would be the prefered place for it however, that means rethinking (refactorig)
+    // my architechture a bit more than I really want to.~#
+    // cache: ?kernel.cache.Cache(u64,[512]u8) = null,
+
 
     pub fn readBlock(self: *BlockDev, blk_num: u64, dst: []u8) BlockDevError!void {
         if (blk_num >= self.tot_length / self.blk_size) {

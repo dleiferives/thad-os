@@ -393,8 +393,13 @@ fn setupInitialContext(thread: *Thread) !void {
     if (thread.is_kernel) {
         log.info("context is kernel",.{});
         // Kernel thread setup
+
         const stack_top = @intFromPtr(thread.kernel_stack.ptr) + thread.kernel_stack.len;
-        thread.context.rsp = stack_top - 16; // Leave some space
+        if(stack_top <= 16) {
+            std.log.err("Kernel stack too small, must be at least 16 bytes is {}", .{stack_top});
+            @panic("Kernel stack too small, must be at least 16 bytes");
+        }
+        thread.context.rsp = (stack_top - 16) & ~@as(u64, 15);
         thread.context.cs = arch.cpu.gdt.SELECTOR.KERNEL_CODE;
         thread.context.ds = arch.cpu.gdt.SELECTOR.KERNEL_DATA;
         thread.context.ss = arch.cpu.gdt.SELECTOR.KERNEL_DATA;
@@ -514,6 +519,7 @@ pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFram
 
     // Load new context and jump to thread
     log.debug("switching context!",.{});
+    to.context.log();
     loadContext(&to.context);
 }
 

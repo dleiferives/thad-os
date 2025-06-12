@@ -934,9 +934,10 @@ pub const Mapper = struct {
         if (pte_ptr.* & PT_PRESENT != 0) {
             // TODO @(dleiferives,1a00506a-16d6-4876-8348-afc704c72718): I should
             // like unmap or something, but I"m just going to overwrite! ~#
-            manager_log.warn("map: virt_addr 0x{x} already mapped to 0x{x}. Overwriting with 0x{x}.\n", .{
-                virt_addr, pte_ptr.* & PTE_ADDR_MASK, phys_addr,
-            });
+            // manager_log.warn("map: virt_addr 0x{x} already mapped to 0x{x}. Overwriting with 0x{x}.\n", .{
+            //     virt_addr, pte_ptr.* & PTE_ADDR_MASK, phys_addr,
+            // });
+            return;
         }
 
         mapper_verbose_log.info("mapped (allocated) virt 0x{X:0>16} -> 0x{X:0>16}", .{ virt_addr, phys_addr });

@@ -95,6 +95,13 @@ pub fn loadElfProgram(
     const program_alloc_wrapper = try program_allocator.createAllocator();
 
     try loadProgramSegments(elf_file, program_mapper, elf_data);
+    try program_mapper.mapDemand(0,
+        mem.PageFlags{
+            .present = true,
+            .writable = true,
+            .user_accessible = !is_kernel,
+            .demand_alloc = true,
+        });
 
     // Create thread
     log.info("Creating program thread...", .{});
@@ -108,7 +115,7 @@ pub fn loadElfProgram(
         parent_allocator,
         false, // Not main thread
         if (is_kernel) .KERNEL else .NORMAL,
-        false, // not creating a stack -> should already be mapped
+        true, // not creating a stack -> should already be mapped
     );
 
     log.info("Program thread created: TID={}", .{program_thread.tid});
@@ -157,6 +164,7 @@ fn readElfFile(path: []const u8, allocator: std.mem.Allocator) ElfLoaderError![]
     vfs.vfs_stat(path, &stat) catch {
         return ElfLoaderError.LoadError;
     };
+    std.log.debug("File size: {}", .{stat.st_size});
 
     const file_data = allocator.alloc(u8, stat.st_size) catch {
         return ElfLoaderError.OutOfMemory;
@@ -167,13 +175,21 @@ fn readElfFile(path: []const u8, allocator: std.mem.Allocator) ElfLoaderError![]
         allocator.free(file_data);
         return ElfLoaderError.LoadError;
     };
+    std.log.debug("Bytes read: {}", .{bytes_read});
 
     if (bytes_read != stat.st_size) {
         allocator.free(file_data);
         return ElfLoaderError.LoadError;
     }
 
-    return file_data;
+    // print out the elf data
+    // for (0..file_data.len/8) |i| {
+    //     log.debug("{X:0>16}", .{@as(u64, std.mem.bytesToValue(u64, file_data[i*8..(i+1)*8]))});
+    // }
+
+    @panic("ELF file read complete, returning data");
+    // return file_data;
+
 }
 
 fn loadProgramSegments(
@@ -194,6 +210,8 @@ fn loadProgramSegments(
 }
 
 /// Load a single ELF segment
+// In elf_loader.zig, modify the loadSegment function to add verification:
+
 fn loadSegment(
     phdr: *const elf.elf.Elf64_Phdr,
     mapper: *mem.Mapper,
@@ -217,7 +235,7 @@ fn loadSegment(
     const flags = mem.PageFlags{
         .present = true,
         .writable = true,
-        .user_accessible = true,
+        .user_accessible = false, // Changed to false since loading as kernel
         .execute_disable = false,
         .demand_alloc = false,
     };
@@ -225,13 +243,37 @@ fn loadSegment(
     const page_aligned_vaddr = vaddr & ~mem.PAGE_MASK_4K;
     const page_aligned_size = ((vaddr + memsz + mem.PAGE_MASK_4K) & ~mem.PAGE_MASK_4K) - page_aligned_vaddr;
 
+    log.info("Mapping pages: 0x{X:0>16} - 0x{X:0>16} (size={})", .{
+        page_aligned_vaddr, page_aligned_vaddr + page_aligned_size, page_aligned_size
+    });
+
     try mapper.mapRange(page_aligned_vaddr, page_aligned_vaddr + page_aligned_size, flags);
 
     if (filesz > 0) {
+        log.info("Copying {} bytes of data to 0x{X:0>16}", .{filesz, vaddr});
         try copySegmentData(vaddr, elf_data[offset..offset + filesz]);
+
+        // VERIFY THE DATA WAS COPIED CORRECTLY
+        log.info("Verifying copied data...", .{});
+        const verify_ptr: [*]const u8 = @ptrFromInt(vaddr);
+        const expected_data = elf_data[offset..offset + @min(filesz, 16)]; // First 16 bytes
+        const actual_data = verify_ptr[0..@min(filesz, 16)];
+
+        log.info("Expected first 16 bytes: {any}", .{expected_data});
+        log.info("Actual first 16 bytes:   {any}", .{actual_data});
+
+        // Compare byte by byte
+        for (expected_data, 0..) |expected_byte, i| {
+            if (actual_data[i] != expected_byte) {
+                log.err("Data mismatch at offset {}: expected 0x{X:0>2}, got 0x{X:0>2}", .{i, expected_byte, actual_data[i]});
+                return ElfLoaderError.LoadError;
+            }
+        }
+        log.info("Data verification passed!", .{});
     }
 
     if (memsz > filesz) {
+        log.info("Zeroing {} bytes at 0x{X:0>16}", .{memsz - filesz, vaddr + filesz});
         try zeroMemory(vaddr + filesz, memsz - filesz);
     }
 
