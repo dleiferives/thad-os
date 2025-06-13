@@ -1,5 +1,4 @@
 // src/drivers/ata.zig
-// Interrupt-driven version with multi-sector support and optimized transfers
 const std = @import("std");
 const arch = @import("arch");
 const kernel = @import("kernel");
@@ -39,6 +38,8 @@ pub const AtaCommand = enum(u8) {
     SET_FEATURES = 0xEF,
 
     // Multi-sector commands
+    // TODO @(dleiferives,f05f56e1-b4f6-4e4f-9bfa-f00b1dd5e5a9): I don't think
+    // that I got these working super good lol ~#
     READ_MULTIPLE = 0xC4,
     READ_MULTIPLE_EXT = 0x29,
     WRITE_MULTIPLE = 0xC5,
@@ -133,7 +134,6 @@ pub const Channel = enum(u1) {
     SECONDARY = 1,
 };
 
-// Operation types
 pub const OperationType = enum {
     NONE,
     read_sector,
@@ -144,7 +144,6 @@ pub const OperationType = enum {
     identify,
 };
 
-// Operation states
 pub const OperationState = enum {
     IDLE,
     COMMAND_SENT,
@@ -154,10 +153,9 @@ pub const OperationState = enum {
     ERROR,
 };
 
-// Transfer modes
 pub const TransferMode = enum {
-    SINGLE_SECTOR,  // One sector per interrupt
-    MULTI_SECTOR,   // Multiple sectors per interrupt
+    SINGLE_SECTOR,
+    MULTI_SECTOR,
 };
 
 // Operation context for tracking async operations
@@ -194,12 +192,12 @@ pub const OperationContext = struct {
     }
 };
 
-// Channel registers
+
 pub const ChannelRegs = struct {
-    base: u16, // I/O base port
-    ctrl: u16, // Control base port
-    bmide: u16, // Bus master IDE port
-    irq: u8, // IRQ number
+    base: u16,
+    ctrl: u16,
+    bmide: u16,
+    irq: u8,
     enabled: bool = false,
 
     // Operation tracking
@@ -227,18 +225,17 @@ pub const DeviceInfo = struct {
     max_lba28: u32 = 0,
     max_lba48: u64 = 0,
 
-    // Performance features
+    // Performance.. what a joke
     supports_dma: bool = false,
     supports_write_cache: bool = false,
     supports_read_ahead: bool = false,
     supports_multiple: bool = false,
-    multiple_sector_count: u8 = 1, // Sectors per interrupt for multiple commands
+    multiple_sector_count: u8 = 1,
     max_multiple_sectors: u8 = 1,
 };
 
-// Fast data transfer functions using rep inw/outw
 fn fastReadSectors(port: u16, buffer: []u8, sector_count: u16) void {
-    const word_count = sector_count * 256; // 256 words per sector
+    const word_count = sector_count * 256;
     const buffer_ptr = @as([*]u16, @ptrCast(@alignCast(buffer.ptr)));
 
     asm volatile (
@@ -253,7 +250,7 @@ fn fastReadSectors(port: u16, buffer: []u8, sector_count: u16) void {
 }
 
 fn fastWriteSectors(port: u16, buffer: []const u8, sector_count: u16) void {
-    const word_count = sector_count * 256; // 256 words per sector
+    const word_count = sector_count * 256;
     const buffer_ptr = @as([*]const u16, @ptrCast(@alignCast(buffer.ptr)));
 
     asm volatile (
@@ -267,7 +264,6 @@ fn fastWriteSectors(port: u16, buffer: []const u8, sector_count: u16) void {
     );
 }
 
-// Alternative single-word transfer functions (fallback)
 fn readSectorWords(port: u16, buffer: []u8) void {
     const buffer_u16: [*]u16 = @ptrCast(@alignCast(buffer.ptr));
 
@@ -514,7 +510,7 @@ pub const AtaController = struct {
 
         log_verbose.info("Starting device identification for channel {}, drive {}", .{ ch_idx, drive_idx });
 
-        // Use synchronous approach for identification (simpler for setup)
+        // Going to do this synchronously for now
         // Step 1: Select the drive
         const drive_select: u8 = 0xA0 | (@as(u8, @intFromEnum(drive)) << 4);
         log_verbose.info("Selecting drive with value 0x{X:0>2}", .{drive_select});
@@ -543,7 +539,6 @@ pub const AtaController = struct {
             return AtaError.NoDevice;
         }
 
-        // Wait for BSY to clear (using polling for identification)
         log_verbose.info("Waiting for BSY bit to clear", .{});
         var timeout: u32 = 10000;
         while ((status & 0x80) != 0 and timeout > 0) : (timeout -= 1) {
@@ -636,7 +631,6 @@ pub const AtaController = struct {
         device_info.supports_multiple = (identify_data[47] & 0xFF) > 1;
         device_info.max_multiple_sectors = @truncate(identify_data[47] & 0xFF);
         if (device_info.supports_multiple) {
-            // Start with a conservative multiple sector count
             device_info.multiple_sector_count = @min(device_info.max_multiple_sectors, 16);
             log_verbose.info("Device supports multiple sector transfers: max={}, setting={}", .{
                 device_info.max_multiple_sectors, device_info.multiple_sector_count
@@ -768,8 +762,6 @@ pub const AtaController = struct {
         log.info("Block device {s} registered successfully", .{name_copy});
     }
 
-    // ========== Interrupt-driven I/O operations ==========
-
     pub fn readSector(self: *Self, device_idx: usize, lba: u64, buffer: []u8) !void {
         return self.readSectors(device_idx, lba, 1, buffer);
     }
@@ -831,13 +823,11 @@ pub const AtaController = struct {
             transfer_mode, sector_count, sectors_per_interrupt
         });
 
-        // Start the operation
         try self.startReadOperation(device_idx, lba, sector_count, transfer_mode);
 
         // Block until operation completes
         try self.waitForOperation(channel);
 
-        // Check for errors
         if (operation.error_code) |err| {
             return err;
         }
@@ -903,13 +893,10 @@ pub const AtaController = struct {
             transfer_mode, sector_count, sectors_per_interrupt
         });
 
-        // Start the operation
         try self.startWriteOperation(device_idx, lba, sector_count, transfer_mode);
 
-        // Block until operation completes
         try self.waitForOperation(channel);
 
-        // Check for errors
         if (operation.error_code) |err| {
             return err;
         }
@@ -950,13 +937,10 @@ pub const AtaController = struct {
         operation.waiting_thread = kernel.thread.getCurrentThread();
         operation.state = .COMMAND_SENT;
 
-        // Start the operation
         try self.startFlushOperation(device_idx);
 
-        // Block until operation completes
         try self.waitForOperation(channel);
 
-        // Check for errors
         if (operation.error_code) |err| {
             return err;
         }
@@ -964,14 +948,12 @@ pub const AtaController = struct {
         log_verbose.info("Cache flush completed for device {}", .{device_idx});
     }
 
-    // ========== Operation starters ==========
 
     fn startReadOperation(self: *Self, device_idx: usize, lba: u64, sector_count: u16, transfer_mode: TransferMode) !void {
         const device = &self.devices[device_idx];
         const channel = device.channel;
         const drive = device.drive;
 
-        // Set up LBA command
         try self.setupLbaCommand(channel, drive, lba, sector_count, true);
 
         // Choose appropriate command based on transfer mode
@@ -993,6 +975,8 @@ pub const AtaController = struct {
         self.writeDataPort(channel, .COMMAND, @intFromEnum(command));
 
         // Record operation start time for timeout
+        // TODO @(dleiferives,cf01795b-fea3-4ea5-8f20-e248b29f7cb2): get the time
+        // system up and running ~#
         const ch_idx = @intFromEnum(channel);
         self.channels[ch_idx].operation_start_time = getCurrentTimeMs();
     }
@@ -1052,8 +1036,6 @@ pub const AtaController = struct {
         self.channels[ch_idx].operation_start_time = getCurrentTimeMs();
     }
 
-    // ========== Blocking and timeout handling ==========
-
     fn waitForOperation(self: *Self, channel: Channel) !void {
         const ch_idx = @intFromEnum(channel);
         const current_thread = kernel.thread.getCurrentThread() orelse return AtaError.DeviceError;
@@ -1085,8 +1067,6 @@ pub const AtaController = struct {
 
         log_verbose.info("Thread {} unblocked from ATA operation", .{current_thread.tid});
     }
-
-    // ========== Interrupt handlers ==========
 
     pub fn handleInterrupt(self: *Self, channel: Channel) void {
         const ch_idx = @intFromEnum(channel);
@@ -1163,7 +1143,6 @@ pub const AtaController = struct {
                 });
             }
         } else if (!status.bsy and !status.drq) {
-            // Operation completed
             log_verbose.info("Read operation completed on channel {}", .{ch_idx});
             operation.state = .COMPLETED;
         }
@@ -1183,7 +1162,6 @@ pub const AtaController = struct {
             const transfer_size = sectors_to_write * 512;
             const sector_buffer = operation.const_buffer.?[buffer_offset..buffer_offset + transfer_size];
 
-            // Use fast transfer for multiple sectors, single transfer for one sector
             if (sectors_to_write > 1) {
                 fastWriteSectors(self.channels[ch_idx].base, sector_buffer, sectors_to_write);
             } else {
@@ -1213,13 +1191,10 @@ pub const AtaController = struct {
         const status = AtaStatus.fromByte(self.readDataPort(channel, .STATUS));
 
         if (!status.bsy and status.rdy and !status.drq) {
-            // Flush completed
             log_verbose.info("Flush operation completed on channel {}", .{@intFromEnum(channel)});
             operation.state = .COMPLETED;
         }
     }
-
-    // ========== Helper functions ==========
 
     fn setupLbaCommand(self: *Self, channel: Channel, drive: DriveSelect, lba: u64, sector_count: u16, is_read: bool) !void {
         _ = is_read;
@@ -1388,10 +1363,9 @@ pub const AtaController = struct {
 // Global controller instance (for callbacks)
 var ata_controller: ?*AtaController = null;
 
-// Helper function to get current time (you may need to implement this)
+// Helper function to get current time
 fn getCurrentTimeMs() u64 {
     // TODO: Implement proper timer/RTC reading
-    // For now, return a dummy value - you'll need to implement this based on your timer system
     return 0;
 }
 
@@ -1612,7 +1586,6 @@ pub fn listDevices() void {
     }
 }
 
-// Helper functions for other modules
 pub fn getController() ?*AtaController {
     return ata_controller;
 }

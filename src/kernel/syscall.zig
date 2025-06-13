@@ -63,12 +63,14 @@ pub fn handleSyscall(frame: *arch.irq.InterruptFrame) void {
 fn handlePutc(frame: *arch.irq.InterruptFrame) void {
     const char_to_print = @as(u8, @truncate(frame.rdi));
     kernel.kputc(char_to_print);
+    std.log.debug("Putc syscall invoked with char: {}", .{char_to_print});
     frame.rax = char_to_print;
 }
 
 fn handleGetc(frame: *arch.irq.InterruptFrame) void {
     // This blocks...
     const char_read = drivers.keyboard.KeyboardBuffer.getc();
+    std.log.debug("Getc syscall invoked, read char: {}", .{char_read});
     frame.rax = char_read;
 }
 

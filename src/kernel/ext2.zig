@@ -593,17 +593,17 @@ pub const Ex2Filesystem = struct {
     /// Returns an error if the block is out of bounds or the buffer is too small.
     /// or if there was trouble with memory
     pub fn getBlock(self: *Self, block:u64) !DataSlice{
-        // if (self.cache.get(block)) |slice| {
-        //     // std.log.info("cache hit for block {d}", .{block});
-        //     return slice;
-        // }
+        if (self.cache.get(block)) |slice| {
+            // std.log.info("cache hit for block {d}", .{block});
+            return slice;
+        }
         const block_addr = self.first_block_addr + (block * self.superblock.block_size);
         // std.log.info("getting block {d} at address {d}", .{block, block_addr});
-        const block_slice = try self.dev.createDataSlice(self.allocator, block_addr, self.superblock.block_size);
-        // block_slice.cached = true;
-        // self.cache.put(block, block_slice) catch {
-        //     block_slice.cached = false;
-        // };
+        var block_slice = try self.dev.createDataSlice(self.allocator, block_addr, self.superblock.block_size);
+        block_slice.cached = true;
+        self.cache.put(block, block_slice) catch {
+            block_slice.cached = false;
+        };
         return block_slice;
     }
 

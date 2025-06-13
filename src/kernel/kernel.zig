@@ -117,7 +117,6 @@ pub fn main() !void {
     // Initialize kernel heap
     try state.initKernelHeap();
 
-    // // Now you can use the allocator
     if (state.testing.allocator) {
         if (state.getKernelAllocator()) |alloc| {
             const pre_pages = state.mem_manager.page_bitfield.getFreePages();
@@ -330,8 +329,6 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         @panic("Failed to initialize ATA driver");
     };
 
-    // Load and run the second program as a kernel thread
-
     // drivers.ata.testRead() catch |err| {
     //     log.err("ATA read test failed: {}", .{err});
     //     @panic("ATA read test failed");
@@ -380,7 +377,6 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
                 @panic("MD5 checksum test failed");
             };
 
-
             testMd5Checksum() catch |err| {
                 log.err("MD5 checksum test failed: {}", .{err});
                 @panic("MD5 checksum test failed");
@@ -394,6 +390,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         // };
 
 
+        state.options.vga_printing = true;
         log.info("Testing ELF program loading...", .{});
         elf_loader.loadAndRunProgram("/bin/program", null, true) catch |err| {
             log.err("Failed to load ELF program: {}", .{err});
@@ -403,6 +400,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         while(true) {
             thread.Thread.yield();
         }
+        state.options.vga_printing = true;
 
 
         fs.deinit(); // Deinitialize the filesystem
@@ -455,6 +453,7 @@ pub const Kernel = struct {
     options: struct {
         polling_keyboard: bool = false,
         vga_printing: bool = true, // Enable VGA printing by default
+        vga_logging: bool = false, // Enable VGA logging by default
     },
 
     vga_addr: usize,
@@ -611,7 +610,9 @@ pub fn print(comptime format: []const u8, args: anytype) void {
     if (drivers.vga.initialized) {
         if (state.options.vga_printing) {
             // Print to VGA
-            drivers.vga.print(format, args) catch {};
+            if(state.options.vga_logging) {
+                drivers.vga.print(format, args) catch {};
+            }
         }
     }
     if (state.stdio_init) {
@@ -680,14 +681,15 @@ pub const ALL_SCOPES = [_]LogScope{
     // .mem_allocator,
     // .mem_allocator_verbose,
     .irq,
-    // .thread_yield,
-    // .irq_page_fault,
+    .thread_yield,
+    .irq_page_fault,
     // .drivers_vga,
     // .drivers_serial_log,
     // .drivers_ps2,
     // .drivers_ps2_verbose,
     // .drivers_keyboard,
     .drivers_ata,
+    // .drivers_ata_verbose,
     // .drivers_ata_verbose,
     // .drivers_keyboard_verbose,
     // .drivers_uart_verbose,
@@ -984,7 +986,7 @@ fn testMd5Checksum() !void {
     log.info("=== Testing MD5 Checksum ===", .{});
 
     const kernel_path = "/boot/kernel";
-    const block_size = 4096; // 4KB blocks
+    const block_size = 4096;
 
     // Open the kernel file
     const file_fd = vfs.vfs_open(
@@ -1042,7 +1044,6 @@ fn testMd5Checksum() !void {
         total_bytes_read += bytes_read;
         block_count = total_bytes_read / 1024;
 
-        // Log progress every 256 blocks (1MB if using 4KB blocks)
         if (block_count % 256 == 0) {
             const mb_processed = total_bytes_read / (1024 * 1024);
             log.info("Processed {} blocks ({} MB)...", .{ block_count, mb_processed });
@@ -1078,8 +1079,6 @@ fn testMd5Checksum() !void {
     log.info("=== MD5 Test Complete ===", .{});
 }
 
-
-pub const root = @import("root");
 
 pub fn kputc(ch: u8) void {
     // possibly disable interrupts?

@@ -329,9 +329,7 @@ pub fn build(b: *std.Build) void {
     });
     parted_boot.step.dependOn(&parted_part.step);
 
-    // Step 3: Install GRUB and format partition (as a bash script)
-    // This step requires root privileges and loop device management.
-    // It is best handled as a script, but you can call it from Zig's build system.
+    // Step 3: Install GRUB and format partition
     const install_grub = b.addSystemCommand(&[_][]const u8{
         "bash", "-c",
         \\set -eux

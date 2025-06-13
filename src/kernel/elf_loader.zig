@@ -166,15 +166,32 @@ fn readElfFile(path: []const u8, allocator: std.mem.Allocator) ElfLoaderError![]
     };
     std.log.debug("File size: {}", .{stat.st_size});
 
-    const file_data = allocator.alloc(u8, stat.st_size) catch {
+    const file_data = allocator.alloc(u8, stat.st_size) catch { //std.mem.alignForward(u64, stat.st_size, 512)) catch {
         return ElfLoaderError.OutOfMemory;
     };
 
     // Read file
-    const bytes_read = vfs.vfs_read(fd, file_data) catch {
-        allocator.free(file_data);
-        return ElfLoaderError.LoadError;
-    };
+    const all_read = stat.st_size;
+    var buffer: [512]u8 = undefined; // 512 bytes buffer for reading
+    var bytes_read: usize = 0;
+    while (bytes_read < all_read) {
+
+        const read_size = @min(all_read - bytes_read, buffer.len);
+        std.log.debug("Reading {} bytes from file", .{read_size});
+        _ = vfs.vfs_read(fd, buffer[0..512]) catch {
+            allocator.free(file_data);
+            return ElfLoaderError.LoadError;
+        };
+        // for (0..buffer[0..512].len/8) |i| {
+        //     log.debug("{X:0>16}", .{@as(u64, std.mem.bytesToValue(u64, buffer[i*8..(i+1)*8]))});
+        // }
+        @memcpy(file_data[bytes_read..bytes_read + read_size], buffer[0..read_size]);
+        bytes_read += read_size;
+    }
+    // const bytes_read = vfs.vfs_read(fd, file_data) catch {
+    //     allocator.free(file_data);
+    //     return ElfLoaderError.LoadError;
+    // };
     std.log.debug("Bytes read: {}", .{bytes_read});
 
     if (bytes_read != stat.st_size) {
@@ -183,12 +200,12 @@ fn readElfFile(path: []const u8, allocator: std.mem.Allocator) ElfLoaderError![]
     }
 
     // print out the elf data
-    // for (0..file_data.len/8) |i| {
-    //     log.debug("{X:0>16}", .{@as(u64, std.mem.bytesToValue(u64, file_data[i*8..(i+1)*8]))});
-    // }
+    for (0..file_data.len/8) |i| {
+        log.debug("{X:0>16}", .{@as(u64, std.mem.bytesToValue(u64, file_data[i*8..(i+1)*8]))});
+    }
 
-    @panic("ELF file read complete, returning data");
-    // return file_data;
+    // @panic("ELF file read complete, returning data");
+    return file_data;
 
 }
 

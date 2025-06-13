@@ -1,5 +1,5 @@
 const std = @import("std");
-const irq = @import("arch").irq; // Your interrupt system
+const irq = @import("arch").irq;
 const arch = @import("arch");
 
 pub const UartError = error{ NotInitialized, BufferFull, BufferEmpty, Timeout };
