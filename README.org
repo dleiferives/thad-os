@@ -1,0 +1,26 @@
+#+title: OS2 Project
+#+author: Dylan Thoreau Leifer-Ives
+* About
+This project was build using zig 0.14.0. It is a somewhat working x64 higher half operating system.
+
+There are some things that I spent too much time on. There are some things which I spent far too little time on and are hacked together.
+
+There are some fundamentally design mistakes that I made, specifically within the virtual file system and how block devices work. And in the ATA driver.
+
+Honestly those parts I just wrote without drawing out how they should interact...
+
+The other thing that I would like to change is remove the centralized kernel state and or have that be reduced down, and have more be controlled by each thread (program).
+
+Overall one of the best classes I've taken.
+
+* Running
+To run this project you will need a copy of zig 0.14.0. To build it run:
+
+#+begin_src
+zig build
+#+end_src
+
+To then run that built kernel run:
+#+begin_src
+zig build run
+#+end_src
