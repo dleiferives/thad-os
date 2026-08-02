@@ -41,8 +41,10 @@ pub const MEMORY_LAYOUT = struct {
 
 
     pub const KERNEL_VIRTUAL_START: u64 = 0xFFFFFF8000000000;
-    pub const KERNEL_VIRTUAL_STACKS_START: u64 = 0xFFFFFF8001000000;
-    pub const KERNEL_VIRTUAL_STACKS_END: u64 =   0xFFFFFF8003FFFFFF;
+    // Keep dynamic thread stacks outside the bootstrap higher-half direct map.
+    // GRUB's retained 2 MiB mappings cover KERNEL_OFFSET + low physical RAM.
+    pub const KERNEL_VIRTUAL_STACKS_START: u64 = 0xFFFF_FF88_0100_0000;
+    pub const KERNEL_VIRTUAL_STACKS_END: u64 =   0xFFFF_FF88_03FF_FFFF;
 
     // Keep the heap outside the higher-half direct map at KERNEL_VIRTUAL_START
     // + physical_address. The old +64 MiB location collided on machines with

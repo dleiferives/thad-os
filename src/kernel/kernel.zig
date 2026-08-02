@@ -679,7 +679,11 @@ pub const Kernel = struct {
         }
         self.multiboot_info_init();
         recordPersistentBootLog("[memory] Multiboot tags located\n");
-        try self.mem_manager.init(self.multiboot_info, self.testing.page_bitfield);
+        try self.mem_manager.init(
+            self.multiboot_info,
+            self.testing.page_bitfield,
+            hasBootFlag("thad-keep-bootstrap-map"),
+        );
         self.initilized.mem_manager = true;
     }
 

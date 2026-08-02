@@ -84,7 +84,12 @@ pub const Manager = struct {
         return result;
     }
 
-    pub fn init(self: *Manager, multiboot_info: multiboot.Multiboot2Info, test_bitfield_before_page_switch: bool) !void {
+    pub fn init(
+        self: *Manager,
+        multiboot_info: multiboot.Multiboot2Info,
+        test_bitfield_before_page_switch: bool,
+        keep_bootstrap_page_map: bool,
+    ) !void {
         manager_log.info("Initializing memory manager", .{});
         bootPhase("parsing firmware memory map");
         // TODO @(dleiferives,50b1d32d-0557-4ce9-875c-a5da623b95e7): Add the physical
@@ -223,6 +228,24 @@ pub const Manager = struct {
         }
 
         manager_log.info("Page bitfield created with {} pages and {} reserved ", .{ self.page_bitfield.pages, self.page_bitfield.getReserved() });
+
+        if (keep_bootstrap_page_map) {
+            bootPhase("retaining validated bootstrap page map");
+            const active_pml4 = Mapper.currentPML4();
+            try Mapper.initScratchMap(self.memory_layout.kernel_offset);
+            const bootstrap_mapper = try self.internal_allocator.create(Mapper);
+            bootstrap_mapper.* = Mapper.init_existing(
+                active_pml4,
+                &self.page_bitfield,
+                self.memory_layout.kernel_offset,
+            );
+            self.mapper = bootstrap_mapper;
+            bootPhase("bootstrap page map ready");
+
+            // TODO: Remove this hardware escape hatch after the replacement
+            // mapper validates critical mappings before its CR3 switch.
+            return;
+        }
 
         manager_log.info("Starting to create the Mapper", .{});
         bootPhase("creating replacement PML4");
@@ -1104,7 +1127,8 @@ pub const Mapper = struct {
         }
 
         if (src_entry & PT_PAGE_SIZE != 0) {
-            @panic("1GB pages not supported in deep copy");
+            dest_entry.* = src_entry;
+            return;
         }
 
         const src_pd_phys = src_entry & PTE_ADDR_MASK;
@@ -1132,8 +1156,12 @@ pub const Mapper = struct {
         }
 
         if (src_entry & PT_PAGE_SIZE != 0) {
-            @panic("2MB pages not supported in deep copy");
+            dest_entry.* = src_entry;
+            return;
         }
+
+        // TODO: Add copy-on-write accounting for shared large pages before
+        // allowing user processes to modify inherited bootstrap mappings.
 
         const src_pt_phys = src_entry & PTE_ADDR_MASK;
         const dest_pt_phys = try self.allocate_page_table_frame();
