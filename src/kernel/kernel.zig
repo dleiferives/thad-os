@@ -83,13 +83,21 @@ pub fn main() !void {
     initBootFramebuffer() catch |err| {
         log.warn("Framebuffer console unavailable: {}", .{err});
     };
+    if (drivers.vga.hasFramebuffer()) {
+        drivers.vga.clear();
+        drivers.vga.setColor(.LIGHT_CYAN, .BLACK);
+        drivers.vga.print("THAD-OS hardware boot\n\n", .{}) catch {};
+        bootStatus("framebuffer ready", .{});
+    }
     if (state.testing.mapper) {
         try state.mem_manager.test_mapper(0xFFFFFF8010000000);
     }
     // state.options.polling_keyboard =true;
     // try arch.cpu.gdt.tester();
 
+    bootStatus("initializing PS/2 controller", .{});
     var ps2_ctrl = try drivers.ps2.Ps2Controller.init();
+    bootStatus("PS/2 controller ready", .{});
     log.info("--- PS/2 Controller Initialized ---\n", .{});
 
     // Initialize the Keyboard Manager with the PS/2 Controller
@@ -119,7 +127,9 @@ pub fn main() !void {
     try drivers.keyboard.setup_irq(&ps2_ctrl, &kbd_manager);
 
     // Initialize kernel heap
+    bootStatus("initializing kernel heap", .{});
     try state.initKernelHeap();
+    bootStatus("kernel heap ready", .{});
 
     if (state.testing.allocator) {
         if (state.getKernelAllocator()) |alloc| {
@@ -328,9 +338,11 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         log.info("Scheduler changed to RunToCompletionScheduler", .{});
     }
 
+    bootStatus("probing AHCI storage", .{});
     drivers.ahci.init() catch |err| {
         log.warn("AHCI driver unavailable: {}", .{err});
     };
+    bootStatus("AHCI probe finished", .{});
 
     drivers.ata.init() catch |err| {
         // Some EFI systems expose their SATA disk only through AHCI. A GRUB
@@ -365,6 +377,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
 
     log.info("starting to create filesystems", .{});
 
+    bootStatus("searching for an ext2 root", .{});
     var ext2_iter = ext2.Ext2FilesystemIterator.init(state.getKernelAllocator() orelse @panic("could not get allocator when trying to test ext2 filesystem")) catch |err| {
         log.err("Failed to initialize ext2 filesystem iterator: {}", .{err});
         @panic("Failed to initialize ext2 filesystem iterator");
@@ -404,6 +417,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
                 while (true) thread.Thread.yield();
             }
 
+            bootStatus("root mounted; starting arcade", .{});
             arcade.run();
         }
     }
@@ -438,20 +452,65 @@ fn hasBootFlag(flag: []const u8) bool {
 }
 
 fn initBootFramebuffer() !void {
+    if (hasBootFlag("thad-macbook41")) {
+        // Debian's efifb DMI quirk confirms these values on this MacBook4,1.
+        // Its EFI UGA scanout uses a padded 8192-byte pitch rather than
+        // width * bytes_per_pixel (5120 bytes).
+        return mapBootFramebuffer(.{
+            .address = 0xA000_0000,
+            .width = 1280,
+            .height = 800,
+            .pitch = 8192,
+            .bits_per_pixel = 32,
+            .red_position = 16,
+            .red_mask_size = 8,
+            .green_position = 8,
+            .green_mask_size = 8,
+            .blue_position = 0,
+            .blue_mask_size = 8,
+        });
+    }
+
     var iterator = state.multiboot_info.getTagTypeIterator(.FRAMEBUFFER_INFO);
     const header = iterator.next() orelse return error.FramebufferTagNotFound;
     const framebuffer: *const multiboot.FramebufferTag = @ptrCast(@alignCast(header));
     if (framebuffer.getType() != .RGB) return error.UnsupportedFramebufferType;
     const rgb = framebuffer.getRgbInfo() orelse return error.MissingRgbInformation;
-    if (rgb.red_mask_size != 8 or rgb.green_mask_size != 8 or rgb.blue_mask_size != 8) {
-        return error.UnsupportedRgbMasks;
-    }
+    return mapBootFramebuffer(.{
+        .address = framebuffer.framebuffer_addr,
+        .width = framebuffer.framebuffer_width,
+        .height = framebuffer.framebuffer_height,
+        .pitch = framebuffer.framebuffer_pitch,
+        .bits_per_pixel = framebuffer.framebuffer_bpp,
+        .red_position = rgb.red_field_position,
+        .red_mask_size = rgb.red_mask_size,
+        .green_position = rgb.green_field_position,
+        .green_mask_size = rgb.green_mask_size,
+        .blue_position = rgb.blue_field_position,
+        .blue_mask_size = rgb.blue_mask_size,
+    });
+}
 
+const BootFramebuffer = struct {
+    address: u64,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    bits_per_pixel: u8,
+    red_position: u8,
+    red_mask_size: u8,
+    green_position: u8,
+    green_mask_size: u8,
+    blue_position: u8,
+    blue_mask_size: u8,
+};
+
+fn mapBootFramebuffer(framebuffer: BootFramebuffer) !void {
     const mapper = state.mem_manager.mapper orelse return error.MapperNotInitialized;
-    const physical_start = framebuffer.framebuffer_addr & ~mem.PAGE_MASK_4K;
-    const first_page_offset = framebuffer.framebuffer_addr & mem.PAGE_MASK_4K;
+    const physical_start = framebuffer.address & ~mem.PAGE_MASK_4K;
+    const first_page_offset = framebuffer.address & mem.PAGE_MASK_4K;
     const byte_length = first_page_offset +
-        @as(u64, framebuffer.framebuffer_pitch) * framebuffer.framebuffer_height;
+        @as(u64, framebuffer.pitch) * framebuffer.height;
     var offset: u64 = 0;
     while (offset < byte_length) : (offset += mem.PAGE_SIZE_4K) {
         const physical = physical_start + offset;
@@ -469,19 +528,34 @@ fn initBootFramebuffer() !void {
         first_page_offset;
     try drivers.vga.initFramebuffer(
         @intCast(virtual_address),
-        framebuffer.framebuffer_width,
-        framebuffer.framebuffer_height,
-        framebuffer.framebuffer_pitch,
-        framebuffer.framebuffer_bpp,
-        rgb.red_field_position,
-        rgb.green_field_position,
-        rgb.blue_field_position,
+        framebuffer.width,
+        framebuffer.height,
+        framebuffer.pitch,
+        framebuffer.bits_per_pixel,
+        framebuffer.red_position,
+        framebuffer.red_mask_size,
+        framebuffer.green_position,
+        framebuffer.green_mask_size,
+        framebuffer.blue_position,
+        framebuffer.blue_mask_size,
     );
     log.info("Framebuffer console initialized: {}x{}x{}", .{
-        framebuffer.framebuffer_width,
-        framebuffer.framebuffer_height,
-        framebuffer.framebuffer_bpp,
+        framebuffer.width,
+        framebuffer.height,
+        framebuffer.bits_per_pixel,
     });
+
+    // TODO: Replace the MacBook4,1 boot-profile constant with a small hardware
+    // quirk table once thad-os can read EFI/DMI system identifiers itself.
+}
+
+fn bootStatus(comptime format: []const u8, args: anytype) void {
+    if (!drivers.vga.hasFramebuffer()) return;
+    drivers.vga.setColor(.LIGHT_GRAY, .BLACK);
+    drivers.vga.print("[boot] " ++ format ++ "\n", args) catch {};
+
+    // TODO: Preserve these checkpoints in an in-memory boot log so failures
+    // can be inspected after adding persistent crash-dump support.
 }
 
 pub const Kernel = struct {

@@ -230,24 +230,18 @@ pub const Manager = struct {
         manager_log.info("Mapping kernel regions into new address space...", .{});
         var current_phys: u64 = 0;
         var current_virt = self.memory_layout.kernel_offset;
+        const direct_map_end = std.mem.alignForward(
+            u64,
+            self.memory_layout.kernel_physical_address_end + (10 * 1024 * 1024),
+            PAGE_SIZE_4K,
+        );
         // Kernel code is executable, data is not. For simplicity, map all as R/W, X for code.
         // A more granular approach would map sections with different flags.
         const kernel_code_data_flags = PageFlags{ .present = true, .writable = true, .execute_disable = false }; // A general kernel flag
 
-        while (true) {
-            // TODO @(dleiferives,fd0a8391-a09e-413c-83f1-43d17b535c6f): Remove
-            // the hacky solution to gettig the kernel to load properly by just
-            // loading an additional meg ontop! ~#
-            if (current_phys > self.memory_layout.kernel_physical_address_end + (10 * 1024 * 1024)) {
-                if (self.page_bitfield.largestFreePage()) |largest_page| {
-                    if (current_phys > largest_page) {
-                        manager_log.err("Physical address 0x{x} is larger than largest free page 0x{x}", .{ current_phys, largest_page });
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
+        while (current_phys < direct_map_end) {
+            // TODO: Replace the 10 MiB compatibility margin with exact ranges
+            // for every early-boot object that requires a higher-half mapping.
             // Align to page boundaries for mapping
             const aligned_virt = current_virt & ~pmask_4k;
             const aligned_phys = current_phys & ~pmask_4k;

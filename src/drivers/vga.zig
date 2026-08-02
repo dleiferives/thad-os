@@ -48,8 +48,11 @@ const Framebuffer = struct {
     pitch: usize,
     bits_per_pixel: u8,
     red_position: u8,
+    red_mask_size: u8,
     green_position: u8,
+    green_mask_size: u8,
     blue_position: u8,
+    blue_mask_size: u8,
 };
 
 var framebuffer: ?Framebuffer = null;
@@ -97,11 +100,22 @@ pub fn initFramebuffer(
     pitch: usize,
     bits_per_pixel: u8,
     red_position: u8,
+    red_mask_size: u8,
     green_position: u8,
+    green_mask_size: u8,
     blue_position: u8,
+    blue_mask_size: u8,
 ) !void {
     if (width < WIDTH * 6 or height < HEIGHT * 8) return error.FramebufferTooSmall;
-    if (bits_per_pixel != 24 and bits_per_pixel != 32) return error.UnsupportedFramebuffer;
+    if (bits_per_pixel != 15 and bits_per_pixel != 16 and bits_per_pixel != 24 and bits_per_pixel != 32) {
+        return error.UnsupportedFramebuffer;
+    }
+    if (red_mask_size == 0 or red_mask_size > 8 or red_position + red_mask_size > bits_per_pixel or
+        green_mask_size == 0 or green_mask_size > 8 or green_position + green_mask_size > bits_per_pixel or
+        blue_mask_size == 0 or blue_mask_size > 8 or blue_position + blue_mask_size > bits_per_pixel)
+    {
+        return error.UnsupportedRgbMasks;
+    }
     framebuffer = .{
         .address = @ptrFromInt(address),
         .width = width,
@@ -109,8 +123,11 @@ pub fn initFramebuffer(
         .pitch = pitch,
         .bits_per_pixel = bits_per_pixel,
         .red_position = red_position,
+        .red_mask_size = red_mask_size,
         .green_position = green_position,
+        .green_mask_size = green_mask_size,
         .blue_position = blue_position,
+        .blue_mask_size = blue_mask_size,
     };
     refresh();
 
@@ -118,6 +135,10 @@ pub fn initFramebuffer(
     // Unicode glyph lookup once the VFS is available during console setup.
     // TODO: Add dirty-cell batching or a back buffer so large redraws can be
     // flushed without redundant MMIO writes or visible tearing.
+}
+
+pub fn hasFramebuffer() bool {
+    return framebuffer != null;
 }
 
 pub fn refresh() void {
@@ -173,12 +194,17 @@ fn putPixel(fb: Framebuffer, x: usize, y: usize, rgb: u32) void {
     const red = (rgb >> 16) & 0xFF;
     const green = (rgb >> 8) & 0xFF;
     const blue = rgb & 0xFF;
-    const pixel = (red << @intCast(fb.red_position)) |
-        (green << @intCast(fb.green_position)) |
-        (blue << @intCast(fb.blue_position));
-    const bytes_per_pixel = fb.bits_per_pixel / 8;
+    const pixel = (scaleChannel(red, fb.red_mask_size) << @intCast(fb.red_position)) |
+        (scaleChannel(green, fb.green_mask_size) << @intCast(fb.green_position)) |
+        (scaleChannel(blue, fb.blue_mask_size) << @intCast(fb.blue_position));
+    const bytes_per_pixel = (@as(usize, fb.bits_per_pixel) + 7) / 8;
     const offset = y * fb.pitch + x * bytes_per_pixel;
     for (0..bytes_per_pixel) |byte| fb.address[offset + byte] = @truncate(pixel >> @intCast(byte * 8));
+}
+
+fn scaleChannel(channel: u32, mask_size: u8) u32 {
+    const maximum = (@as(u32, 1) << @intCast(mask_size)) - 1;
+    return (channel * maximum + 127) / 255;
 }
 
 fn colorRgb(color: u4) u32 {
