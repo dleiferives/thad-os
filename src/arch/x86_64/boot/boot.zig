@@ -2,6 +2,7 @@
 const std = @import("std");
 const arch = @import("arch");
 const kernel = @import("kernel");
+const config = @import("boot_config");
 comptime {
     _ = kernel.kmain;
     _ = kernel.panic;
@@ -32,6 +33,13 @@ export var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack") = und
 // TODO @(dleiferives,ab22758a-dd7e-42ad-916b-bff21ff6c8e2): Replace this with zig
 // and not asm ~#
 comptime {
+    // MacBook4,1 GM965 prefetchable framebuffer aperture. Fill the full
+    // 1280x800 scanout, including its 8192-byte padded stride, magenta.
+    const macbook_early_marker = if (config.macbook_early_fb)
+        "\ncld\nmovl $0x00FF00FF, %eax\nmovl $0xA0000000, %edi\nmovl $1638400, %ecx\nrep stosl\n"
+    else
+        "\n";
+
     asm (
     // setup the multiboot header
         \\ .set MBOOT2_MAGIC, 0xE85250D6
@@ -77,6 +85,10 @@ comptime {
         // Check for multiboot!
         \\ cmpl $0x36d76289, %eax
         \\ jne .no_multiboot
+
+        // This marker runs before thad-os constructs page tables, so it can
+        // distinguish entry failures from later VM/driver failures.
+        ++ macbook_early_marker ++
 
         // Save the location of the multiboot info structure
         \\ movl %ebx, (multiboot_info_ptr - 0xFFFFFF8000000000)
@@ -209,4 +221,8 @@ comptime {
         \\ .set i, i+1
         \\ .endr
     );
+
+    // TODO: Replace the compile-time Mac framebuffer marker with a generic
+    // early-console abstraction once Multiboot tags can be parsed before VM
+    // initialization.
 }

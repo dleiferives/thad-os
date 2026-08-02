@@ -157,6 +157,9 @@ pub fn init() !void {
 
     // TODO: Add write and flush-cache operations when BlockDev grows a write
     // interface. Until then this driver is intentionally read-only.
+    // TODO: Reserve an append-only raw diagnostic region outside filesystem
+    // metadata and add a tiny crash-log writer that Debian can decode after a
+    // failed hardware boot. Do not use ext2 for crash-time logging.
     // TODO: Add hot-plug detection, port reset/recovery, and device removal.
     // TODO: Enumerate multiple HBAs and all implemented SATA ports.
 }

@@ -222,6 +222,7 @@ pub fn build(b: *std.Build) void {
     const test_threading_snakes = b.option(bool, "test_threading_snakes", "Enable test_threading_snakes for early kernel boot") orelse false;
     const test_threading_snakes_hungry = b.option(bool, "test_threading_snakes_hungry", "Enable test_threading_snakes_hungry for early kernel boot") orelse false;
     const test_change_scheduler = b.option(bool, "test_change_scheduler", "Enable test_change_scheduler for early kernel boot") orelse false;
+    const macbook_early_fb = b.option(bool, "macbook_early_fb", "Enable the MacBook4,1 pre-paging framebuffer marker") orelse false;
 
     // Add our options
     const options = b.addOptions();
@@ -235,6 +236,10 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "test_threading_snakes_hungry", test_threading_snakes_hungry);
     options.addOption(bool, "test_change_scheduler", test_change_scheduler);
     kernel.addOptions("config", options);
+
+    const boot_options = b.addOptions();
+    boot_options.addOption(bool, "macbook_early_fb", macbook_early_fb);
+    boot.addOptions("boot_config", boot_options);
 
     // Create an executable
     const exe = b.addExecutable(.{
