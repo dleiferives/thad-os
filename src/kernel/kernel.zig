@@ -653,6 +653,12 @@ fn bootStatus(comptime format: []const u8, args: anytype) void {
     // stable instead of synchronously rewriting the diagnostic region.
 }
 
+/// Emits an early-boot checkpoint to every currently available diagnostic
+/// sink. Hardware drivers use this before the normal logging stack is useful.
+pub fn hardwareBootStatus(comptime format: []const u8, args: anytype) void {
+    bootStatus(format, args);
+}
+
 pub const Kernel = struct {
     testing: struct {
         vga: bool = false,

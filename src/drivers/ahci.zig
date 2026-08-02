@@ -110,7 +110,13 @@ var dma_buffer: [DMA_BUFFER_SIZE]u8 align(4096) = undefined;
 pub fn init() !void {
     if (controller != null) return;
 
+    kernel.hardwareBootStatus("AHCI: scanning PCI", .{});
     const pci_address = findController() orelse return AhciError.ControllerNotFound;
+    kernel.hardwareBootStatus("AHCI: controller {x:0>2}:{x:0>2}.{}", .{
+        pci_address.bus,
+        pci_address.device,
+        pci_address.function,
+    });
     enablePciMemoryAndBusMastering(pci_address);
 
     const abar_low = pciRead32(pci_address, 0x24);
@@ -119,8 +125,10 @@ pub fn init() !void {
     if (bar_type == 0x2) return AhciError.Unsupported64BitBar;
     const abar_phys: u64 = abar_low & 0xFFFF_FFF0;
     if (abar_phys == 0) return AhciError.InvalidAbar;
+    kernel.hardwareBootStatus("AHCI: ABAR physical 0x{x}", .{abar_phys});
 
     const abar_virt = try mapAbar(abar_phys);
+    kernel.hardwareBootStatus("AHCI: ABAR mapped", .{});
     var candidate = Controller{
         .abar_phys = abar_phys,
         .abar_virt = abar_virt,
@@ -128,15 +136,23 @@ pub fn init() !void {
         .sector_count = 0,
     };
 
+    kernel.hardwareBootStatus("AHCI: requesting firmware handoff", .{});
     try biosHandoff(&candidate);
+    kernel.hardwareBootStatus("AHCI: firmware handoff complete", .{});
     writeHba(&candidate, HBA_GHC, readHba(&candidate, HBA_GHC) | GHC_AE);
 
     const implemented = readHba(&candidate, HBA_PI);
+    kernel.hardwareBootStatus("AHCI: implemented ports 0x{x}", .{implemented});
     candidate.port = findSataPort(&candidate, implemented) orelse
         return AhciError.PortNotFound;
+    kernel.hardwareBootStatus("AHCI: SATA disk on port {}", .{candidate.port});
+    kernel.hardwareBootStatus("AHCI: configuring command engine", .{});
     try configurePort(&candidate);
+    kernel.hardwareBootStatus("AHCI: command engine ready", .{});
+    kernel.hardwareBootStatus("AHCI: issuing IDENTIFY", .{});
     candidate.sector_count = try identifyDevice(&candidate);
     if (candidate.sector_count == 0) return AhciError.DeviceTooSmall;
+    kernel.hardwareBootStatus("AHCI: IDENTIFY returned {} sectors", .{candidate.sector_count});
 
     controller = candidate;
     const allocator = kernel.state.getKernelAllocator() orelse return AhciError.NoAllocator;
@@ -152,6 +168,7 @@ pub fn init() !void {
         .next = null,
     };
     block_device.registerBlockDevice(dev);
+    kernel.hardwareBootStatus("AHCI: block device registered", .{});
     std.log.info("AHCI disk registered: port {}, {} sectors", .{
         candidate.port,
         candidate.sector_count,
