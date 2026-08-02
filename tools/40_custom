@@ -1,0 +1,10 @@
+#!/bin/sh
+exec tail -n +3 $0
+
+menuentry "thad-os" {
+    insmod part_gpt
+    insmod ext2
+    search --no-floppy --label thad-os --set=thadroot
+    multiboot2 ($thadroot)/boot/kernel
+    boot
+}

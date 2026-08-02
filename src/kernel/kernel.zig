@@ -1,6 +1,6 @@
 const std = @import("std");
 const drivers = @import("drivers");
-const mem = @import("mem.zig");
+pub const mem = @import("mem.zig");
 const multiboot = @import("multiboot.zig");
 const arch = @import("arch");
 const config = @import("config");
@@ -324,9 +324,20 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         log.info("Scheduler changed to RunToCompletionScheduler", .{});
     }
 
+    drivers.ahci.init() catch |err| {
+        log.warn("AHCI driver unavailable: {}", .{err});
+    };
+
     drivers.ata.init() catch |err| {
-        log.err("Failed to initialize ATA driver: {}", .{err});
-        @panic("Failed to initialize ATA driver");
+        // Some EFI systems expose their SATA disk only through AHCI. A GRUB
+        // Multiboot root module lets thad-os boot there until an AHCI driver is
+        // available.
+        log.warn("ATA driver unavailable: {}", .{err});
+    };
+
+    drivers.multiboot_module.init() catch |err| switch (err) {
+        error.RootModuleNotFound => {},
+        else => log.warn("Could not register Multiboot root module: {}", .{err}),
     };
 
     // drivers.ata.testRead() catch |err| {
@@ -381,14 +392,12 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
                 log.err("MD5 checksum test failed: {}", .{err});
                 @panic("MD5 checksum test failed");
             };
-
         }
 
         // fs.printFullTree() catch |err| {
         //     log.err("Failed to print ext2 filesystem tree: {}", .{err});
         //     @panic("Failed to print ext2 filesystem tree");
         // };
-
 
         state.options.vga_printing = true;
         log.info("Testing ELF program loading...", .{});
@@ -397,11 +406,10 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         };
         allowed_scopes = MAP_TEST_SCOPES[0..];
 
-        while(true) {
+        while (true) {
             thread.Thread.yield();
         }
         state.options.vga_printing = true;
-
 
         fs.deinit(); // Deinitialize the filesystem
     }
@@ -409,7 +417,6 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
     // If no ext2 found, create simple root
     if (!mounted_ext2) {
         @panic("No ext2 filesystem found, cannot mount root");
-
     }
 
     // allowed_scopes = MAP_TEST_SCOPES[0..];
@@ -418,8 +425,6 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
     //     @panic("Mapper tests failed");
     // };
     // // allowed_scopes = ALL_SCOPES[0..];
-
-
 
     var i: u64 = 0;
     while (true) {
@@ -571,7 +576,7 @@ pub const Kernel = struct {
     }
 
     pub fn getKernelAllocator(self: *Kernel) ?std.mem.Allocator {
-        if(self.kernel_allocator) |*alloc|{
+        if (self.kernel_allocator) |*alloc| {
             return alloc.allocator();
         }
         return null;
@@ -610,7 +615,7 @@ pub fn print(comptime format: []const u8, args: anytype) void {
     if (drivers.vga.initialized) {
         if (state.options.vga_printing) {
             // Print to VGA
-            if(state.options.vga_logging) {
+            if (state.options.vga_logging) {
                 drivers.vga.print(format, args) catch {};
             }
         }
@@ -923,8 +928,6 @@ fn testVfsOperations() !void {
     };
     defer vfs.vfs_close(file_fd) catch {};
 
-
-
     log.info("Successfully opened '{s}' as fd {}", .{ grub_cfg_path, file_fd });
 
     var file_stat: vfs.VfsStat = undefined;
@@ -1069,16 +1072,13 @@ fn testMd5Checksum() !void {
 
     // Verify we read the expected amount
     if (total_bytes_read != file_stat.st_size) {
-        log.err("Warning: Expected {} bytes but read {} bytes", .{
-            file_stat.st_size, total_bytes_read
-        });
+        log.err("Warning: Expected {} bytes but read {} bytes", .{ file_stat.st_size, total_bytes_read });
     } else {
         log.info("Successfully processed entire file", .{});
     }
 
     log.info("=== MD5 Test Complete ===", .{});
 }
-
 
 pub fn kputc(ch: u8) void {
     // possibly disable interrupts?

@@ -137,6 +137,17 @@ pub const Manager = struct {
             }
         }
 
+        // GRUB modules remain live after boot. Reserve their physical pages so
+        // the page allocator cannot reuse a memory-backed root filesystem.
+        var module_tag_iterator = multiboot_info.getTagTypeIterator(.MODULE);
+        while (module_tag_iterator.next()) |tag_header| {
+            const module: *const multiboot.ModuleTag = @ptrCast(@alignCast(tag_header));
+            try r_physical.append(.{
+                .start = module.mod_start,
+                .end = module.mod_end,
+            });
+        }
+
         manager_log.debug("Starting cleaning up physical ranges", .{});
 
         // add back the reserved virtual ranges to the reserved physical ranges
@@ -303,6 +314,19 @@ pub const Manager = struct {
             mma_offset += PAGE_SIZE_4K;
         }
         manager_log.info("memory_manager_allocation_buffer mapped.", .{});
+
+        // initScratchMap reaches the active PML4 through the higher-half direct
+        // map. The PML4 can be allocated above the broad mapping loop's last
+        // free page, so map that frame explicitly before switching CR3.
+        const pml4_direct_virt = self.memory_layout.kernel_offset |
+            new_mapper.pml4_phys_addr;
+        if (new_mapper.translate(pml4_direct_virt) == null) {
+            try new_mapper.map(
+                pml4_direct_virt,
+                new_mapper.pml4_phys_addr,
+                PageFlags{ .writable = true, .execute_disable = true },
+            );
+        }
         // new_mapper.scratchmapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
         // const pml4_virt: *PageMapLevel4 = new_mapper.scratchMapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
         // defer new_mapper.scratchMapDemap(new_mapper.pml4_phys_addr);
@@ -311,9 +335,12 @@ pub const Manager = struct {
 
         // After all essential mappings are done for the new_mapper:
         try Mapper.initScratchMap(self.memory_layout.kernel_offset);
+        // Install the scratch-map hierarchy in the new address space while the
+        // old address space is still active. Otherwise initializing it after
+        // CR3 changes would itself require the not-yet-working scratch map.
+        try Mapper.initScratchMapFor(new_mapper.pml4_phys_addr, self.memory_layout.kernel_offset);
         Mapper.loadPML4(new_mapper.pml4_phys_addr);
         manager_log.info("New PML4 (0x{x}) loaded into CR3.", .{new_mapper.pml4_phys_addr});
-        try Mapper.initScratchMap(self.memory_layout.kernel_offset);
 
         // Test translation with the new mapper
         const test_virt_addr = self.memory_layout.kernel_virtual_address_start;
@@ -1831,17 +1858,22 @@ pub const Mapper = struct {
     }
 
     pub fn initScratchMap(kernel_offset: u64) !void {
+        return initScratchMapFor(currentPML4(), kernel_offset);
+    }
+
+    pub fn initScratchMapFor(pml4_phys_addr: u64, kernel_offset: u64) !void {
         const virt_addr = types.MEMORY_LAYOUT.KERNEL_VIRTUAL_SCRATCH_START;
         const pml4_idx = pml4Index(virt_addr);
         const pdpt_idx = pdptIndex(virt_addr);
         const pd_idx = pdIndex(virt_addr);
 
-        const pml4_virt = getTableVirtPtr(currentPML4(), kernel_offset, PageMapLevel4);
+        const pml4_virt = getTableVirtPtr(pml4_phys_addr, kernel_offset, PageMapLevel4);
         const pml4e_val = pml4_virt.entries[pml4_idx];
         std.log.debug("PML4E at index {}: 0x{X:0>16}", .{ pml4_idx, pml4e_val });
 
         if (pml4e_val & PT_PRESENT == 0) {
-            pml4_virt.entries[pml4_idx] = @as(u64, @intFromPtr(&scratch_pdpt) - kernel_offset) | PT_PRESENT;
+            pml4_virt.entries[pml4_idx] = @as(u64, @intFromPtr(&scratch_pdpt) - kernel_offset) |
+                PT_PRESENT | PT_WRITABLE;
         }
         std.log.debug("-> PML4E at index {}: 0x{X:0>16}", .{ pml4_idx, pml4_virt.entries[pml4_idx] });
 
@@ -1851,13 +1883,15 @@ pub const Mapper = struct {
         std.log.debug("PDPTE at index {}: 0x{X:0>16}", .{ pdpt_idx, pdpte_val });
 
         if (pdpte_val & PT_PRESENT == 0) {
-            pdpt_virt.entries[pdpt_idx] = @as(u64, @intFromPtr(&scratch_pd) - kernel_offset) | PT_PRESENT;
+            pdpt_virt.entries[pdpt_idx] = @as(u64, @intFromPtr(&scratch_pd) - kernel_offset) |
+                PT_PRESENT | PT_WRITABLE;
         }
         std.log.debug("-> PDPTE at index {}: 0x{X:0>16}", .{ pdpt_idx, pdpt_virt.entries[pdpt_idx] });
 
         const pd_phys_addr = pdpt_virt.entries[pdpt_idx] & PTE_ADDR_MASK;
         const pd_virt = getTableVirtPtr(pd_phys_addr, kernel_offset, PageDirectory);
-        pd_virt.entries[pd_idx] = @as(u64, @intFromPtr(&scratch_pt) - kernel_offset) | PT_PRESENT;
+        pd_virt.entries[pd_idx] = @as(u64, @intFromPtr(&scratch_pt) - kernel_offset) |
+            PT_PRESENT | PT_WRITABLE;
         std.log.debug("PDE at index {}: 0x{X:0>16}", .{ pd_idx, pd_virt.entries[pd_idx] });
     }
 

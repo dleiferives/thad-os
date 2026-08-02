@@ -28,4 +28,6 @@ pub const irq = switch (builtin.cpu.arch) {
 
 pub const outb = cpu.outb;
 pub const inb = cpu.inb;
-pub const halt= cpu.halt;
+pub const outl = cpu.outl;
+pub const inl = cpu.inl;
+pub const halt = cpu.halt;

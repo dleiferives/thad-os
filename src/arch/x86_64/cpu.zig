@@ -27,7 +27,6 @@ pub inline fn inw(port: u16) u16 {
     );
 }
 
-
 pub inline fn outw(port: u16, value: u16) void {
     asm volatile ("outw %[value], %[port]"
         :
@@ -36,6 +35,20 @@ pub inline fn outw(port: u16, value: u16) void {
     );
 }
 
+pub inline fn inl(port: u16) u32 {
+    return asm volatile ("inl %[port], %[result]"
+        : [result] "={eax}" (-> u32),
+        : [port] "N{dx}" (port),
+    );
+}
+
+pub inline fn outl(port: u16, value: u32) void {
+    asm volatile ("outl %[value], %[port]"
+        :
+        : [value] "{eax}" (value),
+          [port] "N{dx}" (port),
+    );
+}
 
 /// Halt the CPU until the next interrupt
 pub inline fn halt() void {
@@ -59,6 +72,7 @@ pub inline fn in_interrupt() bool {
     asm volatile (
         \\pushfq
         \\popq %[flags]
-        : [flags] "=r" (flags));
+        : [flags] "=r" (flags),
+    );
     return (flags & 0x200) != 0; // Check the IF flag
 }

@@ -1,0 +1,16 @@
+FROM debian:13-slim
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        e2fsprogs \
+        grub-common \
+        grub-efi-amd64-bin \
+        grub-pc-bin \
+        mtools \
+        ovmf \
+        parted \
+        qemu-system-x86 \
+        xorriso \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work

@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = false,
-        .link_libcpp =  false,
+        .link_libcpp = false,
         .single_threaded = true,
         .strip = false,
         //.unwind_tables = false, // enable true for smaller package using in development
@@ -84,7 +84,6 @@ pub fn build(b: *std.Build) void {
         .pic = false,
         .red_zone = false,
         .omit_frame_pointer = false,
-
     });
 
     // Arch
@@ -97,7 +96,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = false,
-        .link_libcpp =  false,
+        .link_libcpp = false,
         .single_threaded = true,
         .strip = false,
         //.unwind_tables = false, // enable true for smaller package using in development
@@ -112,9 +111,7 @@ pub fn build(b: *std.Build) void {
         .pic = false,
         .red_zone = false,
         .omit_frame_pointer = false,
-
     });
-
 
     // Kernel
     const kernel = b.addModule("kernel", .{
@@ -123,7 +120,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = false,
-        .link_libcpp =  false,
+        .link_libcpp = false,
         .single_threaded = true,
         .strip = false,
         //.unwind_tables = false, // enable true for smaller package using in development
@@ -138,9 +135,7 @@ pub fn build(b: *std.Build) void {
         .pic = false,
         .red_zone = false,
         .omit_frame_pointer = false,
-
     });
-
 
     const drivers = b.addModule("drivers", .{
         .root_source_file = b.path("src/drivers/drivers.zig"),
@@ -148,7 +143,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = false,
-        .link_libcpp =  false,
+        .link_libcpp = false,
         .single_threaded = true,
         .strip = false,
         //.unwind_tables = false, // enable true for smaller package using in development
@@ -190,7 +185,6 @@ pub fn build(b: *std.Build) void {
     //     .omit_frame_pointer = false,
     // });
 
-
     // Do imports
 
     // boot.addObjectFile(b.path("src/arch/x86_64/boot/kmain.o"));
@@ -199,16 +193,16 @@ pub fn build(b: *std.Build) void {
     // boot.addImport("arch", arch);
     // boot.addImport("drivers",drivers);
 
-    kernel.addImport("drivers",drivers);
+    kernel.addImport("drivers", drivers);
     // kernel.addImport("core",core);
-    kernel.addImport("arch",arch);
+    kernel.addImport("arch", arch);
 
     // drivers.addImport("core",core);
-    drivers.addImport("arch",arch);
-    drivers.addImport("kernel",kernel);
+    drivers.addImport("arch", arch);
+    drivers.addImport("kernel", kernel);
 
     // arch.addImport("core",core);
-    arch.addImport("kernel",kernel);
+    arch.addImport("kernel", kernel);
     arch.addAssemblyFile(b.path("src/arch/x86_64/context_switch.S"));
 
     // TODO @(dleiferives,e310b4ad-095c-48ad-80fe-3b7d400194a6): move multiboot
@@ -217,33 +211,30 @@ pub fn build(b: *std.Build) void {
 
     // Do assemble :bleh
     // arch.addAssemblyFile(b.path("src/arch/x86_64/cpu/entry_expanded.S"));
-    arch.addObjectFile(b.path("src/arch/x86_64/interrupt_stubs.o"));
+    arch.addAssemblyFile(b.path("src/arch/x86_64/interrupt_stubs.S"));
 
-
-    const test_vga = b.option(bool,"test_vga","Enable Vga Test for early kernel boot") orelse false;
-    const test_pagebitfield = b.option(bool,"test_pagebitfield","Enable page_bitfield for early kernel boot") orelse false;
-    const test_mapper = b.option(bool,"test_mapper","Enable test_mapper for early kernel boot") orelse false;
-    const test_map_dispatch = b.option(bool,"test_map_dispatch","Enable test_map_dispatch for early kernel boot") orelse false;
-    const test_allocator = b.option(bool,"test_allocator","Enable test_allocator for early kernel boot") orelse false;
-    const test_threading_increment = b.option(bool,"test_threading_increment","Enable test_threading_increment for early kernel boot") orelse false;
-    const test_threading_snakes = b.option(bool,"test_threading_snakes","Enable test_threading_snakes for early kernel boot") orelse false;
-    const test_threading_snakes_hungry = b.option(bool,"test_threading_snakes_hungry","Enable test_threading_snakes_hungry for early kernel boot") orelse false;
-    const test_change_scheduler = b.option(bool,"test_change_scheduler","Enable test_change_scheduler for early kernel boot") orelse false;
+    const test_vga = b.option(bool, "test_vga", "Enable Vga Test for early kernel boot") orelse false;
+    const test_pagebitfield = b.option(bool, "test_pagebitfield", "Enable page_bitfield for early kernel boot") orelse false;
+    const test_mapper = b.option(bool, "test_mapper", "Enable test_mapper for early kernel boot") orelse false;
+    const test_map_dispatch = b.option(bool, "test_map_dispatch", "Enable test_map_dispatch for early kernel boot") orelse false;
+    const test_allocator = b.option(bool, "test_allocator", "Enable test_allocator for early kernel boot") orelse false;
+    const test_threading_increment = b.option(bool, "test_threading_increment", "Enable test_threading_increment for early kernel boot") orelse false;
+    const test_threading_snakes = b.option(bool, "test_threading_snakes", "Enable test_threading_snakes for early kernel boot") orelse false;
+    const test_threading_snakes_hungry = b.option(bool, "test_threading_snakes_hungry", "Enable test_threading_snakes_hungry for early kernel boot") orelse false;
+    const test_change_scheduler = b.option(bool, "test_change_scheduler", "Enable test_change_scheduler for early kernel boot") orelse false;
 
     // Add our options
     const options = b.addOptions();
-    options.addOption(bool,"test_vga",test_vga);
-    options.addOption(bool,"test_pagebitfield",test_pagebitfield);
-    options.addOption(bool,"test_mapper",test_mapper);
-    options.addOption(bool,"test_map_dispatch",test_map_dispatch);
-    options.addOption(bool,"test_allocator",test_allocator);
-    options.addOption(bool,"test_threading_increment",test_threading_increment);
-    options.addOption(bool,"test_threading_snakes",test_threading_snakes);
-    options.addOption(bool,"test_threading_snakes_hungry",test_threading_snakes_hungry);
-    options.addOption(bool,"test_change_scheduler",test_change_scheduler);
+    options.addOption(bool, "test_vga", test_vga);
+    options.addOption(bool, "test_pagebitfield", test_pagebitfield);
+    options.addOption(bool, "test_mapper", test_mapper);
+    options.addOption(bool, "test_map_dispatch", test_map_dispatch);
+    options.addOption(bool, "test_allocator", test_allocator);
+    options.addOption(bool, "test_threading_increment", test_threading_increment);
+    options.addOption(bool, "test_threading_snakes", test_threading_snakes);
+    options.addOption(bool, "test_threading_snakes_hungry", test_threading_snakes_hungry);
+    options.addOption(bool, "test_change_scheduler", test_change_scheduler);
     kernel.addOptions("config", options);
-
-
 
     // Create an executable
     const exe = b.addExecutable(.{
@@ -257,8 +248,6 @@ pub fn build(b: *std.Build) void {
 
     exe.addIncludePath(b.path("c-src"));
     exe.addCSourceFile(.{ .file = b.path("c-src/snakes.c") });
-
-
 
     // TODO @(dleiferives,64b269c0-c96d-4583-b536-7930e0615c77): I want to not do
     // this... but I'm just going to do it for the moment I think ~#
@@ -283,7 +272,6 @@ pub fn build(b: *std.Build) void {
     // set our entry point to our entry point
     exe.entry = .{ .symbol_name = "_entry" };
 
-
     // grub expected image base
     // handled in the linker
     // exe.image_base = 0x100000;
@@ -300,8 +288,6 @@ pub fn build(b: *std.Build) void {
 
     // kernel start -------------
 
-
-
     // Install the kernel executable in the install step
     b.installArtifact(exe);
 
@@ -309,24 +295,16 @@ pub fn build(b: *std.Build) void {
     const image_path = "os_image.img";
 
     // Step 1: Create the empty disk image
-    const create_img = b.addSystemCommand(&[_][]const u8{
-        "dd", "if=/dev/zero", std.fmt.comptimePrint("of={s}", .{image_path}), "bs=512", "count=65536"
-    });
+    const create_img = b.addSystemCommand(&[_][]const u8{ "dd", "if=/dev/zero", std.fmt.comptimePrint("of={s}", .{image_path}), "bs=512", "count=65536" });
 
     // Step 2: Partition the image with parted
-    const parted_label = b.addSystemCommand(&[_][]const u8{
-        "parted", image_path, "mklabel", "msdos"
-    });
+    const parted_label = b.addSystemCommand(&[_][]const u8{ "parted", image_path, "mklabel", "msdos" });
     parted_label.step.dependOn(&create_img.step);
 
-    const parted_part = b.addSystemCommand(&[_][]const u8{
-        "parted", image_path, "mkpart", "primary", "ext2", "2048s", "63480s"
-    });
+    const parted_part = b.addSystemCommand(&[_][]const u8{ "parted", image_path, "mkpart", "primary", "ext2", "2048s", "63480s" });
     parted_part.step.dependOn(&parted_label.step);
 
-    const parted_boot = b.addSystemCommand(&[_][]const u8{
-        "parted", image_path, "set", "1", "boot", "on"
-    });
+    const parted_boot = b.addSystemCommand(&[_][]const u8{ "parted", image_path, "set", "1", "boot", "on" });
     parted_boot.step.dependOn(&parted_part.step);
 
     // Step 3: Install GRUB and format partition
@@ -357,13 +335,13 @@ pub fn build(b: *std.Build) void {
         \\trap cleanup EXIT
         \\LOOP1=$(sudo losetup -f --show os_image.img)
         \\LOOP2=$(sudo losetup -f --show -o 1048576 --sizelimit 31453184 os_image.img)
-        \\sudo mke2fs -t ext2 -L "boot" $LOOP2
+        \\sudo mke2fs -t ext2 -L "thad-os" $LOOP2
         // \\sudo mkdosfs -F32 -f 2 $LOOP2
         \\sudo mkdir -p /mnt/osfiles
         \\sudo mount $LOOP2 /mnt/osfiles
         \\sudo grub-install --root-directory=/mnt/osfiles --target=i386-pc --no-floppy --modules="normal part_msdos ext2 multiboot" $LOOP1
         \\sudo chown $(id -u) os_image.img
-        });
+    });
     install_grub.step.dependOn(&parted_boot.step);
 
     // Step 4: Copy kernel and boot files into the image (as a bash script)
@@ -407,13 +385,13 @@ pub fn build(b: *std.Build) void {
 
     // Step 5: Add a run step to boot the image in QEMU
     const run_cmd = b.addSystemCommand(&[_][]const u8{
-        "qemu-system-x86_64", "-d",
+        "qemu-system-x86_64",           "-d",
         "cpu_reset,guest_errors,unimp",
         // "cpu_reset,guest_errors,unimp,int",
         "-s",
         //"-no-reboot","-no-shutdown",
-        "-drive", "file=os_image.img,format=raw",
-        "-serial", "stdio",
+        "-drive",                       "file=os_image.img,format=raw",
+        "-serial",                      "stdio",
     });
     run_cmd.step.dependOn(&install_dev.step);
 

@@ -213,7 +213,12 @@ pub const ModuleTag = extern struct {
     }
 
     pub fn getContents(self: *const ModuleTag) []const u8 {
-        return @as([*]const u8, @ptrFromInt(self.mod_start))[0..self.getSize()];
+        // The boot path removes the low identity map before Multiboot tags are
+        // inspected. Physical RAM remains available through the kernel's
+        // higher-half direct mapping.
+        const virtual_start = types.MEMORY_LAYOUT.KERNEL_VIRTUAL_START |
+            @as(usize, self.mod_start);
+        return @as([*]const u8, @ptrFromInt(virtual_start))[0..self.getSize()];
     }
 
     pub fn containsAddress(self: *const ModuleTag, addr: u32) bool {

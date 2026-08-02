@@ -44,8 +44,11 @@ pub const MEMORY_LAYOUT = struct {
     pub const KERNEL_VIRTUAL_STACKS_START: u64 = 0xFFFFFF8001000000;
     pub const KERNEL_VIRTUAL_STACKS_END: u64 =   0xFFFFFF8003FFFFFF;
 
-    pub const KERNEL_VIRTUAL_HEAP_START: u64 =   0xFFFFFF8004000000;
-    pub const KERNEL_VIRTUAL_HEAP_END: u64 =   0xFFFFFF81FFFFFFFF;
+    // Keep the heap outside the higher-half direct map at KERNEL_VIRTUAL_START
+    // + physical_address. The old +64 MiB location collided on machines with
+    // more than 64 MiB of RAM.
+    pub const KERNEL_VIRTUAL_HEAP_START: u64 = 0xFFFF_FF90_0000_0000;
+    pub const KERNEL_VIRTUAL_HEAP_END: u64 = 0xFFFF_FF90_7FFF_FFFF;
 
     pub const KERNEL_VIRTUAL_RESERVED_START: u64 =   0xFFFFFF8200000000;
     pub const KERNEL_VIRTUAL_RESERVED_END: u64 =   0xFFFFFFFF_FF8F_FFFF;

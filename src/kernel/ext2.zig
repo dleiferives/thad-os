@@ -8,14 +8,14 @@ const mbr = @import("mbr.zig");
 // NOTE @(dleiferives,10ea4a48-2dbc-408a-b30a-d09b0a423f7f): first good inode for
 // files is first_ino ~#
 
-pub const EXT2_MAGIC:u16 = 0xEF53;
-pub const EXT2_BAD_INODE:u32 = 0x0001;
-pub const EXT2_ROOT_INODE:u32 = 0x0002;
-pub const EXT2_ACL_IDX_INODE:u32 = 0x0003;
-pub const EXT2_ACL_DATA_INODE:u32 = 0x0004;
-pub const EXT2_BOOT_LOADER_INODE:u32 = 0x0005;
-pub const EXT2_UNDEL_DIR_INODE:u32 = 0x0006;
-pub const EXT2_BLOCK_GROUP_DESC_SIZE:u64 = 32;
+pub const EXT2_MAGIC: u16 = 0xEF53;
+pub const EXT2_BAD_INODE: u32 = 0x0001;
+pub const EXT2_ROOT_INODE: u32 = 0x0002;
+pub const EXT2_ACL_IDX_INODE: u32 = 0x0003;
+pub const EXT2_ACL_DATA_INODE: u32 = 0x0004;
+pub const EXT2_BOOT_LOADER_INODE: u32 = 0x0005;
+pub const EXT2_UNDEL_DIR_INODE: u32 = 0x0006;
+pub const EXT2_BLOCK_GROUP_DESC_SIZE: u64 = 32;
 
 pub const superblock = struct {
     inodes_count: u32,
@@ -85,6 +85,12 @@ pub const superblock = struct {
         return true;
     }
 
+    pub fn hasVolumeName(self: @This(), expected: []const u8) bool {
+        const end = std.mem.indexOfScalar(u8, &self.volume_name, 0) orelse
+            self.volume_name.len;
+        return std.mem.eql(u8, self.volume_name[0..end], expected);
+    }
+
     pub fn fromBytes(bytes: []const u8) superblock {
         if (bytes.len < 1024) {
             @panic("Superblock bytes must be at least 1024 bytes long");
@@ -92,26 +98,24 @@ pub const superblock = struct {
 
         // do manual coputations
         const log_block_size = @as(u32, std.mem.bytesToValue(u32, bytes[24..28]));
-        const block_size = @as(u64, @as(u64,1024) << @truncate(log_block_size));
+        const block_size = @as(u64, @as(u64, 1024) << @truncate(log_block_size));
         const log_frag_size = @as(i32, std.mem.bytesToValue(i32, bytes[28..32]));
         var log_frag_size_fixed: u32 = 0;
         var frag_size: u64 = 0;
         if (log_frag_size < 0) {
             log_frag_size_fixed = @as(u32, @intCast(-log_frag_size));
-            frag_size = @as(u64, 1024)  >> @truncate(log_frag_size_fixed);
+            frag_size = @as(u64, 1024) >> @truncate(log_frag_size_fixed);
         } else {
             log_frag_size_fixed = @as(u32, @intCast(log_frag_size));
-            frag_size = @as(u64, 1024)  << @truncate(log_frag_size_fixed);
+            frag_size = @as(u64, 1024) << @truncate(log_frag_size_fixed);
         }
         const inodes_count = @as(u32, std.mem.bytesToValue(u32, bytes[0..4]));
         const blocks_count = @as(u32, std.mem.bytesToValue(u32, bytes[4..8]));
         const inodes_per_group = @as(u32, std.mem.bytesToValue(u32, bytes[40..44]));
         const blocks_per_group = @as(u32, std.mem.bytesToValue(u32, bytes[32..36]));
-        const block_groups = if (blocks_per_group == 0) 1 else 1 + ((@as(u64, blocks_count)  - 1 ) / @as(u64, blocks_per_group));
+        const block_groups = if (blocks_per_group == 0) 1 else 1 + ((@as(u64, blocks_count) - 1) / @as(u64, blocks_per_group));
         const inode_groups = if (inodes_per_group == 0) 1 else 1 + ((@as(u64, inodes_count) - 1) / @as(u64, inodes_per_group));
         const num_block_groups = @max(block_groups, inode_groups);
-
-
 
         return superblock{
             // computed fields
@@ -175,7 +179,6 @@ pub const superblock = struct {
             .reserved = bytes[264..1024].*,
         };
     }
-
 };
 
 pub const block_group_desc = struct {
@@ -340,7 +343,6 @@ pub const inode_mode = struct {
 
         return value;
     }
-
 };
 
 pub const inode_flags = struct {
@@ -382,7 +384,6 @@ pub const inode_flags = struct {
             .journal_file_data = (value & 0x00004000) != 0,
             .reserved_for_ext2_library = (value & 0x80000000) != 0,
         };
-
     }
 
     pub fn toValue(self: inode_flags) u32 {
@@ -407,7 +408,6 @@ pub const inode_flags = struct {
 
         return value;
     }
-
 };
 
 pub const directory_entry = struct {
@@ -441,7 +441,7 @@ pub const directory_entry = struct {
         directory_entry_l.name_len = bytes[6];
         directory_entry_l.file_type = FileType.fromValue(bytes[7]);
 
-        @memcpy(directory_entry_l.name_data[0..directory_entry_l.name_len], bytes[8..8 + directory_entry_l.name_len]);
+        @memcpy(directory_entry_l.name_data[0..directory_entry_l.name_len], bytes[8 .. 8 + directory_entry_l.name_len]);
         return directory_entry_l;
     }
     pub inline fn getName(self: *const directory_entry) []const u8 {
@@ -488,8 +488,6 @@ pub const FileType = enum(u8) {
     }
 };
 
-
-
 pub const Ex2Error = error{
     InvalidArgument,
     InvalidFilesystem,
@@ -522,7 +520,7 @@ pub const Ex2Filesystem = struct {
     block_groups: []block_group_desc,
 
     // Block Cache!
-    cache: kernel.cache.Cache(u64,DataSlice,&DataSlice.destroy),
+    cache: kernel.cache.Cache(u64, DataSlice, &DataSlice.destroy),
 
     pub const Self = @This();
 
@@ -545,15 +543,13 @@ pub const Ex2Filesystem = struct {
         };
         errdefer self.deinit();
 
-
         // Read the superblock
-        if(!try self.readSuperblock()) {
+        if (!try self.readSuperblock()) {
             self.deinit();
             return null;
         }
 
         try self.readBlockGroups();
-
 
         return self;
     }
@@ -562,7 +558,7 @@ pub const Ex2Filesystem = struct {
         const addr_start = self.partition_entry.lba_first_absolute * self.dev.blk_size;
         const offset = 1024; // superblock offset is 1024 bytes
         const size = 1024; // Superblock size is 1024 bytes
-        var superblock_slice = try self.dev.createDataSlice(self.allocator, addr_start + offset, size);//addr_start + offset + size);
+        var superblock_slice = try self.dev.createDataSlice(self.allocator, addr_start + offset, size); //addr_start + offset + size);
 
         defer superblock_slice.free();
         const sb = superblock.fromBytes(superblock_slice.data);
@@ -580,7 +576,7 @@ pub const Ex2Filesystem = struct {
     /// must be deallocated after use
     fn readBlockGroups(self: *Self) !void {
         std.log.info("reading block groups for device: {*}", .{self.dev});
-        var block_groups_slice = try self.dev.createDataSlice(self.allocator, self.first_data_block_addr + self.superblock.block_size, @intCast(self.superblock.num_block_groups * EXT2_BLOCK_GROUP_DESC_SIZE) );
+        var block_groups_slice = try self.dev.createDataSlice(self.allocator, self.first_data_block_addr + self.superblock.block_size, @intCast(self.superblock.num_block_groups * EXT2_BLOCK_GROUP_DESC_SIZE));
         defer block_groups_slice.free();
         self.block_groups = try self.allocator.alloc(block_group_desc, self.superblock.num_block_groups);
         for (0..self.superblock.num_block_groups) |i| {
@@ -592,7 +588,7 @@ pub const Ex2Filesystem = struct {
     /// Gets a block from the filesystem. fills the buffer with the block data.
     /// Returns an error if the block is out of bounds or the buffer is too small.
     /// or if there was trouble with memory
-    pub fn getBlock(self: *Self, block:u64) !DataSlice{
+    pub fn getBlock(self: *Self, block: u64) !DataSlice {
         if (self.cache.get(block)) |slice| {
             // std.log.info("cache hit for block {d}", .{block});
             return slice;
@@ -607,23 +603,21 @@ pub const Ex2Filesystem = struct {
         return block_slice;
     }
 
-
-    pub fn getBlockRaw(self: *Self, block:u64, data: []u8) !void{
+    pub fn getBlockRaw(self: *Self, block: u64, data: []u8) !void {
         const block_addr = self.first_block_addr + (block * self.superblock.block_size);
         const block_num = @as(u64, block_addr / self.dev.blk_size);
         try self.dev.readBlock(block_num, data);
     }
 
-
     // TODO @(dleiferives,0dc80541-38c9-48de-a000-efbc0d1f7bdd): add conversion
     // between block sizes... ~#
-    pub fn getBlocksRaw(self: *Self, block:u64, count: u64, data: []u8) !void{
+    pub fn getBlocksRaw(self: *Self, block: u64, count: u64, data: []u8) !void {
         const block_addr = self.first_block_addr + (block * self.superblock.block_size);
         const block_num = @as(u64, block_addr / self.dev.blk_size);
         try self.dev.readBlocks(block_num, count * self.dev.blk_size / self.superblock.block_size, data);
     }
 
-    pub fn getInode(self: *Self, inode_num: u64) !inode_table_entry{
+    pub fn getInode(self: *Self, inode_num: u64) !inode_table_entry {
         if (inode_num == 0) return std.mem.zeroes(inode_table_entry);
         if (inode_num > self.superblock.inodes_count) return Ex2Error.InodeNotFound;
 
@@ -644,7 +638,7 @@ pub const Ex2Filesystem = struct {
         var block_slice = try self.getBlock(inode_table + inode_block);
         defer block_slice.free();
 
-        const inode_mem: []u8 = block_slice.data[inode_block_offset..inode_block_offset+self.superblock.inode_size];
+        const inode_mem: []u8 = block_slice.data[inode_block_offset .. inode_block_offset + self.superblock.inode_size];
         var result: inode_table_entry = undefined;
         result = inode_table_entry.fromBytes(inode_mem);
         return result;
@@ -653,13 +647,12 @@ pub const Ex2Filesystem = struct {
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.block_groups);
         self.allocator.destroy(self);
-
     }
 
     pub inline fn getInodeBlockID(self: *Self, inode: inode_table_entry, block_index: u32) !u32 {
         const indirect_block_size = self.superblock.block_size / @sizeOf(u32);
         const double_indirect_block_size = indirect_block_size * indirect_block_size;
-        if(block_index < 12) {
+        if (block_index < 12) {
             return inode.blocks[block_index]; // Direct block
         } else if (block_index < 12 + indirect_block_size) {
             // Single indirect block
@@ -711,12 +704,11 @@ pub const Ex2Filesystem = struct {
         return try self.getBlock(block_id);
     }
 
-
     pub fn printDirectoryEntries(self: *Self, inode: inode_table_entry, depth: u64) !void {
         if (!inode.mode.directory) {
             return error.InvalidFilesystem; // Not a directory
         }
-        if( inode.size == 0) {
+        if (inode.size == 0) {
             std.log.info("Directory is empty.", .{});
             return;
         }
@@ -730,25 +722,20 @@ pub const Ex2Filesystem = struct {
             while (offset < block_slice.data.len) {
                 const entry = directory_entry.fromBytes(block_slice.data[offset..]);
                 if (entry.rec_len == 0) break; // No more entries in this block
-                std.log.info("{s}{s}{s}", .{
-                    if (depth == 0) "" else depth_buff[0..depth*3],
-                    if (depth == 0) "" else "- ",
-                    entry.getName()
-                });
-                if(entry.file_type == FileType.directory) cont_b: {
-                    if(std.mem.eql(u8, "..",entry.getName())) break :cont_b;
-                    if(std.mem.eql(u8, ".",entry.getName())) break :cont_b;
+                std.log.info("{s}{s}{s}", .{ if (depth == 0) "" else depth_buff[0 .. depth * 3], if (depth == 0) "" else "- ", entry.getName() });
+                if (entry.file_type == FileType.directory) cont_b: {
+                    if (std.mem.eql(u8, "..", entry.getName())) break :cont_b;
+                    if (std.mem.eql(u8, ".", entry.getName())) break :cont_b;
                     const next_inode = try self.getInode(entry.inode);
                     // if(next_inode.flags.index_format_directory) {
                     //     std.log.info(" index directory... not supported yet", .{});
                     // } else {
-                        try self.printDirectoryEntries(next_inode,depth+1);
+                    try self.printDirectoryEntries(next_inode, depth + 1);
                     // }
                 }
                 offset += @intCast(entry.rec_len);
             }
         }
-
     }
 
     pub fn printFullTree(self: *Self) !void {
@@ -757,7 +744,7 @@ pub const Ex2Filesystem = struct {
             return error.InvalidFilesystem; // Not a directory
         }
         std.log.info("Root inode: {any}", .{root_inode});
-        try self.printDirectoryEntries(root_inode,0);
+        try self.printDirectoryEntries(root_inode, 0);
     }
 };
 
@@ -771,7 +758,7 @@ pub fn printStruct(comptime T: type, value: T) void {
             inline for (structInfo.fields) |field| {
                 const field_name = field.name;
                 const field_value = @field(value, field_name);
-                std.log.info("{s}: {any}", .{field_name, field_value});
+                std.log.info("{s}: {any}", .{ field_name, field_value });
             }
         },
         else => @compileError("Only structs are supported!"),
@@ -785,7 +772,6 @@ pub const Ext2FilesystemIterator = struct {
     partition_entry_iter: ?mbr.PartitionEntryIterator,
     partition_entry: ?mbr.partition_table_entry,
     allocator: std.mem.Allocator,
-
 
     pub fn init(allocator: std.mem.Allocator) !Ext2FilesystemIterator {
         var block_device_iter = block_device.getBlockDeviceIterator();
@@ -815,16 +801,25 @@ pub const Ext2FilesystemIterator = struct {
                 return self.next(); // Try the next partition
             };
             if (fs_n) |fs| {
+                // Do not accidentally mount an unrelated ext2 filesystem (for
+                // example an old Linux /boot partition) as thad-os's root.
+                // "boot" keeps existing project disk images compatible.
+                if (!fs.superblock.hasVolumeName("thad-os") and
+                    !fs.superblock.hasVolumeName("boot"))
+                {
+                    std.log.info("Skipping ext2 filesystem without a thad-os root label", .{});
+                    fs.deinit();
+                    return self.next();
+                }
                 // Successfully created an ext2 filesystem
-                std.log.info("Found ext2 filesystem on device: {*}, partition: at {}", .{self.dev.?, ent.lba_first_absolute});
+                std.log.info("Found ext2 filesystem on device: {*}, partition: at {}", .{ self.dev.?, ent.lba_first_absolute });
                 self.partition_entry = ent;
                 return fs; // Return the filesystem
             } else {
                 // Not a valid ext2 filesystem, continue to the next partition
-                std.log.info("Partition {any} on device {any} is not a valid ext2 filesystem.", .{ent, self.dev.?});
+                std.log.info("Partition {any} on device {any} is not a valid ext2 filesystem.", .{ ent, self.dev.? });
                 return self.next();
             }
-
         } else {
             // No more partition entries, move to the next device
             std.log.info("No more partition entries for device: {*}, moving to the next device.", .{self.dev.?});
