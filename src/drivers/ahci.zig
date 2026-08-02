@@ -62,11 +62,15 @@ const COMMAND_TABLE_SIZE = 256;
 const DMA_BUFFER_SIZE = 64 * 1024;
 const MAX_SECTORS_PER_COMMAND = DMA_BUFFER_SIZE / 512;
 const POLL_LIMIT: usize = 20_000_000;
+// Keep controller MMIO outside both the retained bootstrap direct map and the
+// kernel heap. The AHCI register file fits in one 4 KiB page for 32 ports.
+const AHCI_MMIO_VIRTUAL_BASE: u64 = 0xFFFF_FF98_0000_0000;
 
 pub const AhciError = error{
     ControllerNotFound,
     Unsupported64BitBar,
     InvalidAbar,
+    MmioVirtualRangeBusy,
     BiosHandoffTimeout,
     PortNotFound,
     CommandEngineTimeout,
@@ -249,24 +253,18 @@ fn mapAbar(abar_phys: u64) !usize {
     const mapper = kernel.state.mem_manager.mapper orelse return error.MapperNotInitialized;
     const page_mask = kernel.mem.PAGE_MASK_4K;
     const physical_start = abar_phys & ~page_mask;
-    const virtual_start = kernel.state.mem_manager.memory_layout.kernel_offset |
-        physical_start;
-    var offset: u64 = 0;
-    while (offset < 0x2000) : (offset += kernel.mem.PAGE_SIZE_4K) {
-        const virtual = virtual_start + offset;
-        if (mapper.translate(virtual) != null) {
-            _ = mapper.unmap(virtual) catch {};
-        }
-        try mapper.map(virtual, physical_start + offset, kernel.mem.PageFlags{
-            .writable = true,
-            .cache_disable = true,
-            .execute_disable = true,
-        });
+    if (mapper.translate(AHCI_MMIO_VIRTUAL_BASE) != null) {
+        return AhciError.MmioVirtualRangeBusy;
     }
-    return @intCast(virtual_start + (abar_phys & page_mask));
+    try mapper.map(AHCI_MMIO_VIRTUAL_BASE, physical_start, kernel.mem.PageFlags{
+        .writable = true,
+        .cache_disable = true,
+        .execute_disable = true,
+    });
+    return @intCast(AHCI_MMIO_VIRTUAL_BASE + (abar_phys & page_mask));
 
-    // TODO: Reserve a dedicated kernel MMIO virtual range and track mappings
-    // instead of borrowing the higher-half direct-map address.
+    // TODO: Replace this single fixed window with a shared MMIO virtual-range
+    // allocator before supporting multiple HBAs and other MMIO drivers.
     // TODO: Configure PAT/MTRR policy for stronger uncacheable MMIO semantics.
 }
 
