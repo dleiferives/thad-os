@@ -30,6 +30,7 @@ extern void         draw_all_snakes();
 extern void         run_snake(void *s);
 extern void         run_hungry_snake(void *s);
 extern void         kill_snake();
+extern int          snakes_running();
 extern unsigned int get_snake_delay();
 extern void         set_snake_delay(unsigned int msec);
 extern snake        snakeFromLWpid(int lw_pid);

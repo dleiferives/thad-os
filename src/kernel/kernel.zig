@@ -16,6 +16,7 @@ const vfs = @import("vfs.zig");
 const simple_fs = @import("simple_fs.zig");
 const elf = @import("elf.zig");
 const elf_loader = @import("elf_loader.zig");
+const arcade = @import("arcade.zig");
 const builtin = @import("builtin");
 pub const cache = @import("lru_cache.zig");
 
@@ -79,6 +80,9 @@ pub fn main() !void {
 
     // Initilize the memory manager
     try state.mem_manager_init();
+    initBootFramebuffer() catch |err| {
+        log.warn("Framebuffer console unavailable: {}", .{err});
+    };
     if (state.testing.mapper) {
         try state.mem_manager.test_mapper(0xFFFFFF8010000000);
     }
@@ -367,6 +371,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
     };
 
     var mounted_ext2 = false;
+    const run_elf_boot_test = hasBootFlag("thad-test-elf");
     while (ext2_iter.next()) |fs| {
         log.info("found ext2 filesystem: {s}", .{fs.superblock.volume_name});
         log.info("There are {} blocks in this filesystem", .{fs.superblock.blocks_count});
@@ -381,37 +386,26 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
             };
             mounted_ext2 = true;
 
-            // Test VFS operations
-            log.info("Testing VFS operations", .{});
-            testVfsOperations() catch |err| {
-                log.err("VFS tests failed: {}", .{err});
-                @panic("MD5 checksum test failed");
-            };
+            if (run_elf_boot_test) {
+                log.info("Testing VFS operations", .{});
+                testVfsOperations() catch |err| {
+                    log.err("VFS tests failed: {}", .{err});
+                    @panic("VFS test failed");
+                };
+                testMd5Checksum() catch |err| {
+                    log.err("MD5 checksum test failed: {}", .{err});
+                    @panic("MD5 checksum test failed");
+                };
+                log.info("Testing ELF program loading...", .{});
+                elf_loader.loadAndRunProgram("/bin/program", null, true) catch |err| {
+                    log.err("Failed to load ELF program: {}", .{err});
+                };
+                allowed_scopes = MAP_TEST_SCOPES[0..];
+                while (true) thread.Thread.yield();
+            }
 
-            testMd5Checksum() catch |err| {
-                log.err("MD5 checksum test failed: {}", .{err});
-                @panic("MD5 checksum test failed");
-            };
+            arcade.run();
         }
-
-        // fs.printFullTree() catch |err| {
-        //     log.err("Failed to print ext2 filesystem tree: {}", .{err});
-        //     @panic("Failed to print ext2 filesystem tree");
-        // };
-
-        state.options.vga_printing = true;
-        log.info("Testing ELF program loading...", .{});
-        elf_loader.loadAndRunProgram("/bin/program", null, true) catch |err| {
-            log.err("Failed to load ELF program: {}", .{err});
-        };
-        allowed_scopes = MAP_TEST_SCOPES[0..];
-
-        while (true) {
-            thread.Thread.yield();
-        }
-        state.options.vga_printing = true;
-
-        fs.deinit(); // Deinitialize the filesystem
     }
 
     // If no ext2 found, create simple root
@@ -434,6 +428,60 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         arch.cpu.halt();
         i += 1;
     }
+}
+
+fn hasBootFlag(flag: []const u8) bool {
+    var iterator = state.multiboot_info.getTagTypeIterator(.COMMAND_LINE);
+    const header = iterator.next() orelse return false;
+    const command_line: *const multiboot.CommandLineTag = @ptrCast(@alignCast(header));
+    return command_line.hasFlag(flag);
+}
+
+fn initBootFramebuffer() !void {
+    var iterator = state.multiboot_info.getTagTypeIterator(.FRAMEBUFFER_INFO);
+    const header = iterator.next() orelse return error.FramebufferTagNotFound;
+    const framebuffer: *const multiboot.FramebufferTag = @ptrCast(@alignCast(header));
+    if (framebuffer.getType() != .RGB) return error.UnsupportedFramebufferType;
+    const rgb = framebuffer.getRgbInfo() orelse return error.MissingRgbInformation;
+    if (rgb.red_mask_size != 8 or rgb.green_mask_size != 8 or rgb.blue_mask_size != 8) {
+        return error.UnsupportedRgbMasks;
+    }
+
+    const mapper = state.mem_manager.mapper orelse return error.MapperNotInitialized;
+    const physical_start = framebuffer.framebuffer_addr & ~mem.PAGE_MASK_4K;
+    const first_page_offset = framebuffer.framebuffer_addr & mem.PAGE_MASK_4K;
+    const byte_length = first_page_offset +
+        @as(u64, framebuffer.framebuffer_pitch) * framebuffer.framebuffer_height;
+    var offset: u64 = 0;
+    while (offset < byte_length) : (offset += mem.PAGE_SIZE_4K) {
+        const physical = physical_start + offset;
+        const virtual = state.mem_manager.memory_layout.kernel_offset | physical;
+        if (mapper.translate(virtual) == null) {
+            try mapper.map(virtual, physical, mem.PageFlags{
+                .writable = true,
+                .cache_disable = true,
+                .execute_disable = true,
+            });
+        }
+    }
+
+    const virtual_address = (state.mem_manager.memory_layout.kernel_offset | physical_start) +
+        first_page_offset;
+    try drivers.vga.initFramebuffer(
+        @intCast(virtual_address),
+        framebuffer.framebuffer_width,
+        framebuffer.framebuffer_height,
+        framebuffer.framebuffer_pitch,
+        framebuffer.framebuffer_bpp,
+        rgb.red_field_position,
+        rgb.green_field_position,
+        rgb.blue_field_position,
+    );
+    log.info("Framebuffer console initialized: {}x{}x{}", .{
+        framebuffer.framebuffer_width,
+        framebuffer.framebuffer_height,
+        framebuffer.framebuffer_bpp,
+    });
 }
 
 pub const Kernel = struct {
@@ -665,10 +713,12 @@ pub const LogScope = enum {
     simple_fs,
     kernel_vfs,
     elf_loader,
+    arcade,
 };
 
 pub var allowed_scopes: ?[]const LogScope = null;
 pub const ALL_SCOPES = [_]LogScope{
+    .arcade,
     .mapper_tests,
     .elf_loader,
     // .simple_fs,

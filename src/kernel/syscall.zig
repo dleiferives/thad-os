@@ -83,19 +83,18 @@ fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
         const stats = scheduler.getStats();
         const thread_count = stats.total_threads;
         yield_log.info("Yielding thread, total threads: {}", .{thread_count});
-        if (thread_count > 1){
+        if (thread_count > 1) {
             const current_thread = scheduler.current_thread;
             const next_thread = scheduler.selectNext() orelse {
                 yield_log.err("No next thread to switch to", .{});
                 return;
             };
-            if (current_thread == null){
+            if (current_thread == null) {
                 yield_log.err("No current thread to yield", .{});
-
-            }else{
+            } else {
                 // current_thread.?.context = frame.toThreadContext();
             }
-            yield_log.info("Switching from thread {} to thread {}", .{if (current_thread) |t| t.tid else 9999, next_thread.tid});
+            yield_log.info("Switching from thread {} to thread {}", .{ if (current_thread) |t| t.tid else 9999, next_thread.tid });
             // Do the context switch
             scheduler.current_thread = next_thread;
             thread.switchContext(current_thread, next_thread, frame);
@@ -120,7 +119,7 @@ fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
                 yield_log.err("No current thread to yield", .{});
                 return;
             };
-            if (current_thread != next){
+            if (current_thread != next) {
                 scheduler.current_thread = next;
                 thread.switchContext(current_thread, next, frame);
             } else {
@@ -138,25 +137,27 @@ fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
 fn handleThreadExit(frame: *arch.irq.InterruptFrame) void {
     const exit_code = frame.rdi;
 
-    if(kernel.state.scheduler) |*sched| {
-        if(sched.current_thread) |cthread|{
-            if(cthread.is_start){
+    if (kernel.state.scheduler) |*sched| {
+        if (sched.current_thread) |cthread| {
+            if (cthread.is_start) {
                 std.log.info("Cannot exit the starting thread, exiting with code: {}", .{exit_code});
                 frame.rax = @intFromError(SyscallError.InvalidArgument);
                 @panic("Cannot exit the starting thread");
             } else {
                 sched.removeThread(cthread) catch |err| {
-                    std.log.err("Failed to remove thread {}: {}", .{cthread.tid, err});
+                    std.log.err("Failed to remove thread {}: {}", .{ cthread.tid, err });
                     frame.rax = @intFromError(SyscallError.ResourceUnavailable);
                     return;
                 };
-                cthread.exit_code = @truncate(@as(i64,@intCast(exit_code)));
+                cthread.exit_code = @truncate(@as(i64, @intCast(exit_code)));
                 const next = sched.selectNext() orelse {
                     std.log.err("No next thread to switch to, returning with code: {}", .{exit_code});
                     frame.rax = @intFromError(SyscallError.ResourceUnavailable);
                     return;
                 };
                 sched.current_thread = next;
+                thread.setCurrentThread(next);
+                next.state = .RUNNING;
                 thread.loadContext(&next.context);
             }
         } else {
@@ -169,6 +170,8 @@ fn handleThreadExit(frame: *arch.irq.InterruptFrame) void {
                 return;
             };
             sched.current_thread = next;
+            thread.setCurrentThread(next);
+            next.state = .RUNNING;
             thread.loadContext(&next.context);
             return;
         }
@@ -180,7 +183,7 @@ fn handleThreadExit(frame: *arch.irq.InterruptFrame) void {
 }
 
 fn handleThreadCreate(frame: *arch.irq.InterruptFrame) void {
-    const entry_fn = @as(*const fn(*anyopaque) callconv(.C) i32, @ptrFromInt(frame.rdi));
+    const entry_fn = @as(*const fn (*anyopaque) callconv(.C) i32, @ptrFromInt(frame.rdi));
     const arg = @as(?*anyopaque, @ptrFromInt(frame.rsi));
 
     if (thread.getCurrentThread()) |current| {
@@ -212,14 +215,12 @@ fn handleThreadJoin(frame: *arch.irq.InterruptFrame) void {
     @panic("Thread join syscall not implemented yet");
 }
 
-
 fn handleExec(frame: *arch.irq.InterruptFrame) void {
     const path_ptr = frame.rdi;
     const args_ptr = frame.rsi;
     _ = args_ptr;
 
     const path = std.mem.span(@as([*:0]const u8, @ptrFromInt(path_ptr)));
-
 
     elf_loader.loadAndRunProgram(path, null, false) catch |err| {
         std.log.err("Exec failed: {}", .{err});

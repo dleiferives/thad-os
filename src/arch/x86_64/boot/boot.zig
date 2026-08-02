@@ -7,7 +7,6 @@ comptime {
     _ = kernel.panic;
 }
 
-
 pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, return_address: ?usize) noreturn {
     kernel.panic(msg, trace, return_address);
 }
@@ -22,7 +21,7 @@ pub const std_options: std.Options = .{
     .logFn = kernel.logger,
     .log_level = .debug,
     .page_size_min = 4096, // 4 KiB
-    .page_size_max = 1024 * 1024 * 1024 , // 1Gb
+    .page_size_max = 1024 * 1024 * 1024, // 1Gb
 };
 
 // Using the linker to sneakily move some asm into language code
@@ -30,12 +29,11 @@ pub const std_options: std.Options = .{
 // this will become the stack that the kernel uses
 export var kernel_stack: [1024 << 4]u8 align(16) linksection(".bss.stack") = undefined;
 
-
 // TODO @(dleiferives,ab22758a-dd7e-42ad-916b-bff21ff6c8e2): Replace this with zig
 // and not asm ~#
 comptime {
     asm (
-        // setup the multiboot header
+    // setup the multiboot header
         \\ .set MBOOT2_MAGIC, 0xE85250D6
         \\ .set MBOOT2_ARCH, 0
         \\ .set MBOOT2_LENGTH, (Multiboot2HeaderEnd - Multiboot2Header)
@@ -48,6 +46,16 @@ comptime {
         \\ .long MBOOT2_ARCH
         \\ .long MBOOT2_LENGTH
         \\ .long MBOOT2_CHECKSUM
+        \\
+        // Request the MacBook's native 1280x800-style 32-bit framebuffer.
+        // The tag is optional so machines without that exact mode still boot.
+        \\ .short 5
+        \\ .short 1
+        \\ .long 20
+        \\ .long 1280
+        \\ .long 800
+        \\ .long 32
+        \\ .balign 8
         \\
         \\ .short 0
         \\ .short 0

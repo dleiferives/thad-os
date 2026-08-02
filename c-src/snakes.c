@@ -77,7 +77,7 @@ snake allsnakes=NULL;
 static int rows;                /* global for the obvious reasons */
 static int cols;
 
-static int endsnake = 0;            /* a flag, that when set causes the
+static volatile int endsnake = 0;   /* a flag, that when set causes the
                                  * currently running snake to exit
                                  */
 
@@ -217,7 +217,6 @@ void run_hungry_snake(void *arg){
     }
     /* now check to see if we've been signaled to exit */
     if ( endsnake ) {
-      endsnake=0;               /* clear the flag */
       erase_snake(*s);
       free_snake(*s);
       kexit();
@@ -237,7 +236,6 @@ void run_snake(void *arg){
     move_snake(*s);
     draw_snake(*s);
     if ( endsnake ) {
-      endsnake=0;               /* clear the flag */
       erase_snake(*s);
       free_snake(*s);
       kexit();
@@ -408,6 +406,10 @@ void kill_snake(){
   endsnake=1;
 }
 
+int snakes_running(){
+  return allsnakes != NULL;
+}
+
 
 static int snake_delay=10;     /* default 50 msec */
 extern unsigned int get_snake_delay() {
@@ -461,6 +463,7 @@ void setup_snakes(int hungry)
    static snake s[MAXSNAKES];
    struct Process *snake;
 
+   endsnake = 0;
    // Don't use this seed for anything meaningful
    srand(PROC_get_current_pid());
    rows = VGA_row_count();

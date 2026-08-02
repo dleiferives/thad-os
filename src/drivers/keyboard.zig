@@ -13,11 +13,20 @@ const Mutex = kernel.mutex.Mutex;
 const ThreadQueue = kernel.thread_queue.ThreadQueue;
 const thread = kernel.thread;
 
-
 const arch = @import("arch");
-var ps2_ctrl : *Ps2Controller  = undefined;
-var kbd_mgr  : *KeyboardManager = undefined;
+var ps2_ctrl: *Ps2Controller = undefined;
+var kbd_mgr: *KeyboardManager = undefined;
 
+pub const InputCode = struct {
+    pub const escape: u8 = 0x1B;
+    pub const arrow_up: u8 = 0x80;
+    pub const arrow_down: u8 = 0x81;
+    pub const arrow_left: u8 = 0x82;
+    pub const arrow_right: u8 = 0x83;
+};
+
+// TODO: Replace byte-valued navigation sentinels with a queue of structured
+// KeyEvents so applications can distinguish text, modifiers, and key release.
 
 // Based on common Scan Code Set 2 values.
 // TODO @(dleiferives,794619e9-698f-40b4-8108-2bad486f7e48): add all of the
@@ -25,23 +34,55 @@ var kbd_mgr  : *KeyboardManager = undefined;
 const Key = enum {
     Unknown,
     Escape,
-    N1, N2, N3, N4, N5, N6, N7, N8, N9, N0,
+    N1,
+    N2,
+    N3,
+    N4,
+    N5,
+    N6,
+    N7,
+    N8,
+    N9,
+    N0,
     Minus,
     Equals,
     Backspace,
     Tab,
-    Q, W, E, R, T, Y, U, I, O, P,
+    Q,
+    W,
+    E,
+    R,
+    T,
+    Y,
+    U,
+    I,
+    O,
+    P,
     LeftBracket,
     RightBracket,
     Enter,
     LeftCtrl,
-    A, S, D, F, G, H, J, K, L,
+    A,
+    S,
+    D,
+    F,
+    G,
+    H,
+    J,
+    K,
+    L,
     Semicolon,
     Apostrophe,
     Grave, // Backtick `
     LeftShift,
     Backslash,
-    Z, X, C, V, B, N, M,
+    Z,
+    X,
+    C,
+    V,
+    B,
+    N,
+    M,
     Comma,
     Period,
     Slash,
@@ -50,7 +91,16 @@ const Key = enum {
     LeftAlt,
     Space,
     CapsLock,
-    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
     NumLock,
     ScrollLock,
 
@@ -69,7 +119,8 @@ const Key = enum {
     KeypadPeriod,
     KeypadSlash,
     KeypadEnter,
-    F11, F12,
+    F11,
+    F12,
 
     E0_KeypadEnter,
     E0_RightCtrl,
@@ -99,9 +150,43 @@ const Key = enum {
     KeyRelease, // I really don't know how to handle this yet... i'm just going to ignore it
 
     pub fn toChar(key: Key, shift: bool, caps_lock: bool) ?u8 {
+        const navigation = switch (key) {
+            .Escape => InputCode.escape,
+            .E0_ArrowUp => InputCode.arrow_up,
+            .E0_ArrowDown => InputCode.arrow_down,
+            .E0_ArrowLeft => InputCode.arrow_left,
+            .E0_ArrowRight => InputCode.arrow_right,
+            else => null,
+        };
+        if (navigation) |code| return code;
+
         const is_alpha = switch (key) {
-            .A, .B, .C, .D, .E, .F, .G, .H, .I, .J, .K, .L, .M,
-            .N, .O, .P, .Q, .R, .S, .T, .U, .V, .W, .X, .Y, .Z,
+            .A,
+            .B,
+            .C,
+            .D,
+            .E,
+            .F,
+            .G,
+            .H,
+            .I,
+            .J,
+            .K,
+            .L,
+            .M,
+            .N,
+            .O,
+            .P,
+            .Q,
+            .R,
+            .S,
+            .T,
+            .U,
+            .V,
+            .W,
+            .X,
+            .Y,
+            .Z,
             => true,
             else => false,
         };
@@ -110,46 +195,142 @@ const Key = enum {
 
         if (!effective_shift) {
             return switch (key) {
-                .A => 'a', .B => 'b', .C => 'c', .D => 'd', .E => 'e',
-                .F => 'f', .G => 'g', .H => 'h', .I => 'i', .J => 'j',
-                .K => 'k', .L => 'l', .M => 'm', .N => 'n', .O => 'o',
-                .P => 'p', .Q => 'q', .R => 'r', .S => 's', .T => 't',
-                .U => 'u', .V => 'v', .W => 'w', .X => 'x', .Y => 'y',
+                .A => 'a',
+                .B => 'b',
+                .C => 'c',
+                .D => 'd',
+                .E => 'e',
+                .F => 'f',
+                .G => 'g',
+                .H => 'h',
+                .I => 'i',
+                .J => 'j',
+                .K => 'k',
+                .L => 'l',
+                .M => 'm',
+                .N => 'n',
+                .O => 'o',
+                .P => 'p',
+                .Q => 'q',
+                .R => 'r',
+                .S => 's',
+                .T => 't',
+                .U => 'u',
+                .V => 'v',
+                .W => 'w',
+                .X => 'x',
+                .Y => 'y',
                 .Z => 'z',
-                .N0 => '0', .N1 => '1', .N2 => '2', .N3 => '3', .N4 => '4',
-                .N5 => '5', .N6 => '6', .N7 => '7', .N8 => '8', .N9 => '9',
-                .Space => ' ', .Comma => ',', .Period => '.', .Slash => '/',
-                .Semicolon => ';', .Apostrophe => '\'', .LeftBracket => '[',
-                .RightBracket => ']', .Backslash => '\\', .Minus => '-',
-                .Equals => '=', .Grave => '`',
-                .Keypad0 => '0', .Keypad1 => '1', .Keypad2 => '2', .Keypad3 => '3',
-                .Keypad4 => '4', .Keypad5 => '5', .Keypad6 => '6', .Keypad7 => '7',
-                .Keypad8 => '8', .Keypad9 => '9',
-                .KeypadSlash => '/', .KeypadAsterisk => '*', .KeypadMinus => '-',
-                .KeypadPlus => '+', .KeypadPeriod => '.',
-                .Enter => '\n', .E0_KeypadEnter => '\n', .Tab => '\t',
+                .N0 => '0',
+                .N1 => '1',
+                .N2 => '2',
+                .N3 => '3',
+                .N4 => '4',
+                .N5 => '5',
+                .N6 => '6',
+                .N7 => '7',
+                .N8 => '8',
+                .N9 => '9',
+                .Space => ' ',
+                .Comma => ',',
+                .Period => '.',
+                .Slash => '/',
+                .Semicolon => ';',
+                .Apostrophe => '\'',
+                .LeftBracket => '[',
+                .RightBracket => ']',
+                .Backslash => '\\',
+                .Minus => '-',
+                .Equals => '=',
+                .Grave => '`',
+                .Keypad0 => '0',
+                .Keypad1 => '1',
+                .Keypad2 => '2',
+                .Keypad3 => '3',
+                .Keypad4 => '4',
+                .Keypad5 => '5',
+                .Keypad6 => '6',
+                .Keypad7 => '7',
+                .Keypad8 => '8',
+                .Keypad9 => '9',
+                .KeypadSlash => '/',
+                .KeypadAsterisk => '*',
+                .KeypadMinus => '-',
+                .KeypadPlus => '+',
+                .KeypadPeriod => '.',
+                .Enter => '\n',
+                .E0_KeypadEnter => '\n',
+                .Tab => '\t',
                 else => null,
             };
         } else { // Shift is pressed or CapsLock is on for alpha
             return switch (key) {
-                .A => 'A', .B => 'B', .C => 'C', .D => 'D', .E => 'E',
-                .F => 'F', .G => 'G', .H => 'H', .I => 'I', .J => 'J',
-                .K => 'K', .L => 'L', .M => 'M', .N => 'N', .O => 'O',
-                .P => 'P', .Q => 'Q', .R => 'R', .S => 'S', .T => 'T',
-                .U => 'U', .V => 'V', .W => 'W', .X => 'X', .Y => 'Y',
+                .A => 'A',
+                .B => 'B',
+                .C => 'C',
+                .D => 'D',
+                .E => 'E',
+                .F => 'F',
+                .G => 'G',
+                .H => 'H',
+                .I => 'I',
+                .J => 'J',
+                .K => 'K',
+                .L => 'L',
+                .M => 'M',
+                .N => 'N',
+                .O => 'O',
+                .P => 'P',
+                .Q => 'Q',
+                .R => 'R',
+                .S => 'S',
+                .T => 'T',
+                .U => 'U',
+                .V => 'V',
+                .W => 'W',
+                .X => 'X',
+                .Y => 'Y',
                 .Z => 'Z',
-                .N0 => ')', .N1 => '!', .N2 => '@', .N3 => '#', .N4 => '$',
-                .N5 => '%', .N6 => '^', .N7 => '&', .N8 => '*', .N9 => '(',
-                .Space => ' ', .Comma => '<', .Period => '>', .Slash => '?',
-                .Semicolon => ':', .Apostrophe => '"', .LeftBracket => '{',
-                .RightBracket => '}', .Backslash => '|', .Minus => '_',
-                .Equals => '+', .Grave => '~',
-                .Keypad0 => '0', .Keypad1 => '1', .Keypad2 => '2', .Keypad3 => '3',
-                .Keypad4 => '4', .Keypad5 => '5', .Keypad6 => '6', .Keypad7 => '7',
-                .Keypad8 => '8', .Keypad9 => '9',
-                .KeypadSlash => '/', .KeypadAsterisk => '*', .KeypadMinus => '-',
-                .KeypadPlus => '+', .KeypadPeriod => '.',
-                .Enter => '\n', .E0_KeypadEnter => '\n', .Tab => '\t',
+                .N0 => ')',
+                .N1 => '!',
+                .N2 => '@',
+                .N3 => '#',
+                .N4 => '$',
+                .N5 => '%',
+                .N6 => '^',
+                .N7 => '&',
+                .N8 => '*',
+                .N9 => '(',
+                .Space => ' ',
+                .Comma => '<',
+                .Period => '>',
+                .Slash => '?',
+                .Semicolon => ':',
+                .Apostrophe => '"',
+                .LeftBracket => '{',
+                .RightBracket => '}',
+                .Backslash => '|',
+                .Minus => '_',
+                .Equals => '+',
+                .Grave => '~',
+                .Keypad0 => '0',
+                .Keypad1 => '1',
+                .Keypad2 => '2',
+                .Keypad3 => '3',
+                .Keypad4 => '4',
+                .Keypad5 => '5',
+                .Keypad6 => '6',
+                .Keypad7 => '7',
+                .Keypad8 => '8',
+                .Keypad9 => '9',
+                .KeypadSlash => '/',
+                .KeypadAsterisk => '*',
+                .KeypadMinus => '-',
+                .KeypadPlus => '+',
+                .KeypadPeriod => '.',
+                .Enter => '\n',
+                .E0_KeypadEnter => '\n',
+                .Tab => '\t',
                 else => null,
             };
         }
@@ -159,21 +340,21 @@ const Key = enum {
 fn scancodeSet2ToKey(sc: u8, e0_prefix: bool) Key {
     if (e0_prefix) {
         return switch (sc) {
-            0x1C => .E0_KeypadEnter,
-            0x1D => .E0_RightCtrl,
-            0x35 => .E0_KeypadSlash,
+            0x5A => .E0_KeypadEnter,
+            0x14 => .E0_RightCtrl,
+            0x4A => .E0_KeypadSlash,
             // 0x37 => .E0_PrintScreen, // Often E0, 2A, E0, 37 for make
-            0x38 => .E0_RightAlt,
-            0x47 => .E0_Home,
-            0x48 => .E0_ArrowUp,
-            0x49 => .E0_PageUp,
-            0x4B => .E0_ArrowLeft,
-            0x4D => .E0_ArrowRight,
-            0x4F => .E0_End,
-            0x50 => .E0_ArrowDown,
-            0x51 => .E0_PageDown,
-            0x52 => .E0_Insert,
-            0x53 => .E0_Delete,
+            0x11 => .E0_RightAlt,
+            0x6C => .E0_Home,
+            0x75 => .E0_ArrowUp,
+            0x7D => .E0_PageUp,
+            0x6B => .E0_ArrowLeft,
+            0x74 => .E0_ArrowRight,
+            0x69 => .E0_End,
+            0x72 => .E0_ArrowDown,
+            0x7A => .E0_PageDown,
+            0x70 => .E0_Insert,
+            0x71 => .E0_Delete,
             0x5B => .E0_LeftSuper,
             0x5C => .E0_RightSuper,
             0x5D => .E0_Apps,
@@ -259,11 +440,11 @@ fn scancodeSet2ToKey(sc: u8, e0_prefix: bool) Key {
             0x6F => .Keypad5,
             0x70 => .Keypad6, // Right !NumLock
             0x71 => .Keypad8, // Up !NumLock
-            0x72 => .Escape,
+            0x76 => .Escape,
             0x73 => .NumLock,
             0x74 => .F11,
             0x75 => .KeypadPlus,
-            0x76 => .F7,
+            0x83 => .F7,
             0x77 => .Keypad3, // PageDown !NumLock
             0x78 => .KeypadMinus,
             0x79 => .KeypadAsterisk,
@@ -450,7 +631,7 @@ pub const KeyboardManager = struct {
                         log_verbose.info("KeyboardManager: Found '{s}' on Port 1.\n", .{@tagName(id.device_type)});
                         manager.keyboard1 = Ps2KeyboardDevice.init(0, ps2_controller, id.device_type);
                         manager.keyboard1.?.updateLeds() catch |e| {
-                           log_verbose.info("Initial LED update for KBD1 failed: {s}\n", .{@errorName(e)});
+                            log_verbose.info("Initial LED update for KBD1 failed: {s}\n", .{@errorName(e)});
                         };
                     },
                     else => {
@@ -470,7 +651,7 @@ pub const KeyboardManager = struct {
                         log_verbose.info("KeyboardManager: Found '{s}' on Port 2.\n", .{@tagName(id.device_type)});
                         manager.keyboard2 = Ps2KeyboardDevice.init(1, ps2_controller, id.device_type);
                         manager.keyboard2.?.updateLeds() catch |e| {
-                           log_verbose.info("Initial LED update for KBD2 failed: {s}\n", .{@errorName(e)});
+                            log_verbose.info("Initial LED update for KBD2 failed: {s}\n", .{@errorName(e)});
                         };
                     },
                     else => {
@@ -518,7 +699,6 @@ pub const KeyboardManager = struct {
                 if (self.keyboard1 != null) port_source = 0;
             }
 
-
             if (port_source) |idx| {
                 var kbd: ?*Ps2KeyboardDevice = null;
                 if (idx == 0 and self.keyboard1 != null) {
@@ -529,7 +709,7 @@ pub const KeyboardManager = struct {
 
                 if (kbd) |active_kbd| {
                     // We have a keyboard device for this port
-                    log_verbose.info("PS/2 Controller: Processing scancode {x} from keyboard on port {d}.\n", .{scancode, idx});
+                    log_verbose.info("PS/2 Controller: Processing scancode {x} from keyboard on port {d}.\n", .{ scancode, idx });
                     if (active_kbd.processScancode(scancode)) |key_event| {
                         // try vga.driver.print("KBD Port {d}: Key={s}, Pressed={d}, Char='{c}'\n", .{
                         //     idx, @tagName(key_event.key), key_event.pressed, key_event.char orelse ' '
@@ -572,10 +752,9 @@ fn irq1Handler(frame: *arch.irq.InterruptFrame) void {
 
 pub fn setup_irq(ctrl: *Ps2Controller, mgr: *KeyboardManager) !void {
     ps2_ctrl = ctrl;
-    kbd_mgr  = mgr;
+    kbd_mgr = mgr;
     try arch.irq.irq.registerIrq(1, irq1Handler);
 }
-
 
 // Lovely buffering keyboard
 // for when we have threading!!!!!!
@@ -680,7 +859,6 @@ pub const KeyboardBuffer = struct {
         try arch.irq.irq.registerIrq(1, bufferedKeyboardInterruptHandler);
         arch.irq.irq.enable();
     }
-
 };
 
 var keyboard_buffer: KeyboardBuffer = .{};

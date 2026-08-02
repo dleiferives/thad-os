@@ -1,5 +1,6 @@
 const std = @import("std");
 const arch = @import("arch");
+const font = @import("font5x7.zig");
 
 const Writer = std.io.Writer;
 const log = std.log.scoped(.drivers_vga);
@@ -40,6 +41,19 @@ var fg_color: u4 = @intFromEnum(Color.LIGHT_GRAY);
 var bg_color: u4 = @intFromEnum(Color.BLACK);
 pub var initialized: bool = false;
 
+const Framebuffer = struct {
+    address: [*]volatile u8,
+    width: usize,
+    height: usize,
+    pitch: usize,
+    bits_per_pixel: u8,
+    red_position: u8,
+    green_position: u8,
+    blue_position: u8,
+};
+
+var framebuffer: ?Framebuffer = null;
+
 pub fn init(buffer_addr: usize) void {
     if (initialized) return;
 
@@ -49,7 +63,6 @@ pub fn init(buffer_addr: usize) void {
     fg_color = @intFromEnum(Color.LIGHT_GRAY);
     bg_color = @intFromEnum(Color.BLACK);
 
-    
     clear();
     initialized = true;
 }
@@ -57,7 +70,7 @@ pub fn init(buffer_addr: usize) void {
 pub fn clear() void {
     const entry = makeEntry(' ', fg_color, bg_color);
     for (0..WIDTH * HEIGHT) |i| {
-        buffer[i] = entry;
+        setEntry(i, entry);
     }
     row = 0;
     column = 0;
@@ -70,6 +83,112 @@ pub fn setColor(foreground: Color, background: Color) void {
 
 pub fn makeEntry(ch: u8, fg: u4, bg: u4) u16 {
     return @as(u16, ch) | (@as(u16, fg) << 8) | (@as(u16, bg) << 12);
+}
+
+pub fn setCell(x: usize, y: usize, ch: u8, fg: u4, bg: u4) void {
+    if (x >= WIDTH or y >= HEIGHT) return;
+    setEntry(y * WIDTH + x, makeEntry(ch, fg, bg));
+}
+
+pub fn initFramebuffer(
+    address: usize,
+    width: usize,
+    height: usize,
+    pitch: usize,
+    bits_per_pixel: u8,
+    red_position: u8,
+    green_position: u8,
+    blue_position: u8,
+) !void {
+    if (width < WIDTH * 6 or height < HEIGHT * 8) return error.FramebufferTooSmall;
+    if (bits_per_pixel != 24 and bits_per_pixel != 32) return error.UnsupportedFramebuffer;
+    framebuffer = .{
+        .address = @ptrFromInt(address),
+        .width = width,
+        .height = height,
+        .pitch = pitch,
+        .bits_per_pixel = bits_per_pixel,
+        .red_position = red_position,
+        .green_position = green_position,
+        .blue_position = blue_position,
+    };
+    refresh();
+
+    // TODO: Replace the built-in 5x7 ASCII font with PSF font loading and
+    // Unicode glyph lookup once the VFS is available during console setup.
+    // TODO: Add dirty-cell batching or a back buffer so large redraws can be
+    // flushed without redundant MMIO writes or visible tearing.
+}
+
+pub fn refresh() void {
+    if (framebuffer == null) return;
+    for (0..WIDTH * HEIGHT) |index| renderEntry(index, buffer[index]);
+}
+
+fn setEntry(index: usize, entry: u16) void {
+    buffer[index] = entry;
+    renderEntry(index, entry);
+}
+
+fn renderEntry(index: usize, entry: u16) void {
+    const fb = framebuffer orelse return;
+    const cell_width = fb.width / WIDTH;
+    const cell_height = fb.height / HEIGHT;
+    const cell_x = (index % WIDTH) * cell_width;
+    const cell_y = (index / WIDTH) * cell_height;
+    const character: u8 = @truncate(entry);
+    const foreground: u4 = @truncate(entry >> 8);
+    const background: u4 = @truncate(entry >> 12);
+    const foreground_rgb = colorRgb(foreground);
+    const background_rgb = colorRgb(background);
+
+    for (0..cell_height) |y| for (0..cell_width) |x| {
+        putPixel(fb, cell_x + x, cell_y + y, background_rgb);
+    };
+
+    const scale_x = @max(1, cell_width / 6);
+    const scale_y = @max(1, cell_height / 8);
+    const glyph_width = 5 * scale_x;
+    const glyph_height = 7 * scale_y;
+    const offset_x = (cell_width -| glyph_width) / 2;
+    const offset_y = (cell_height -| glyph_height) / 2;
+    for (0..7) |glyph_y| {
+        const bits = font.row(character, glyph_y);
+        for (0..5) |glyph_x| {
+            if (bits & (@as(u8, 1) << @intCast(4 - glyph_x)) == 0) continue;
+            for (0..scale_y) |pixel_y| for (0..scale_x) |pixel_x| {
+                putPixel(
+                    fb,
+                    cell_x + offset_x + glyph_x * scale_x + pixel_x,
+                    cell_y + offset_y + glyph_y * scale_y + pixel_y,
+                    foreground_rgb,
+                );
+            };
+        }
+    }
+}
+
+fn putPixel(fb: Framebuffer, x: usize, y: usize, rgb: u32) void {
+    if (x >= fb.width or y >= fb.height) return;
+    const red = (rgb >> 16) & 0xFF;
+    const green = (rgb >> 8) & 0xFF;
+    const blue = rgb & 0xFF;
+    const pixel = (red << @intCast(fb.red_position)) |
+        (green << @intCast(fb.green_position)) |
+        (blue << @intCast(fb.blue_position));
+    const bytes_per_pixel = fb.bits_per_pixel / 8;
+    const offset = y * fb.pitch + x * bytes_per_pixel;
+    for (0..bytes_per_pixel) |byte| fb.address[offset + byte] = @truncate(pixel >> @intCast(byte * 8));
+}
+
+fn colorRgb(color: u4) u32 {
+    const palette = [_]u32{
+        0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
+        0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+        0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
+        0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+    };
+    return palette[color];
 }
 
 pub fn putChar(ch: u8) void {
@@ -89,10 +208,10 @@ pub fn putChar(ch: u8) void {
         },
         '\x08' => { // Backspace
             if (column > 0) column -= 1;
-            buffer[row * WIDTH + column] = makeEntry(' ', fg_color, bg_color);
+            setCell(column, row, ' ', fg_color, bg_color);
         },
         else => {
-            buffer[row * WIDTH + column] = makeEntry(ch, fg_color, bg_color);
+            setCell(column, row, ch, fg_color, bg_color);
             column += 1;
         },
     }
@@ -108,14 +227,14 @@ pub fn putChar(ch: u8) void {
         // Move everything up one line
         for (1..HEIGHT) |y| {
             for (0..WIDTH) |x| {
-                buffer[(y-1) * WIDTH + x] = buffer[y * WIDTH + x];
+                setEntry((y - 1) * WIDTH + x, buffer[y * WIDTH + x]);
             }
         }
 
         // Clear the last line
         const empty = makeEntry(' ', fg_color, bg_color);
         for (0..WIDTH) |x| {
-            buffer[(HEIGHT-1) * WIDTH + x] = empty;
+            setEntry((HEIGHT - 1) * WIDTH + x, empty);
         }
 
         row = HEIGHT - 1;
@@ -153,7 +272,7 @@ pub inline fn test_vga() !void {
     log.info("VGA test started\n", .{});
     try print("{c}\n", .{'a'}); // should be "a"
     try print("{c}\n", .{'Q'}); // should be "Q"
-    try print("{c}\n", .{@as(u8,@truncate(256 + '9'))}); // Should be "9"
+    try print("{c}\n", .{@as(u8, @truncate(256 + '9'))}); // Should be "9"
     try print("{s}\n", .{"test string"}); // "test string"
     try print("foo{s}bar\n", .{"blah"}); // "foo%sbar"
     try print("foo%sbar\n", .{}); // "foo%sbar"
@@ -163,7 +282,7 @@ pub inline fn test_vga() !void {
     try print("{d}\n", .{std.math.maxInt(u32)}); // "4294967295"
     try print("{x}\n", .{0xDEADbeef}); // "deadbeef"
     try print("{x}\n", .{std.math.maxInt(usize)}); // "0xFFFFFFFFFFFFFFFF"
-    try print("{d}\n", .{@as(i16,@truncate(0x8000))}); // "-32768"
+    try print("{d}\n", .{@as(i16, @truncate(0x8000))}); // "-32768"
     try print("{d}\n", .{0x7FFF}); // "65535"
     try print("{d}\n", .{0xFFFF}); // "65535"
     try print("{d}\n", .{std.math.minInt(i64)});
