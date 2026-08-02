@@ -101,37 +101,32 @@ pub const PageBitField = struct {
 
     /// Reserves a range of pages in the bitfield.
     pub fn reserveRanges(self: *PageBitField, range: []types.MemoryRange) !void {
-        // For each range, we need to reserve the pages
+        // Only walk intersections represented by this bitfield. Firmware can
+        // describe enormous reserved PCI/EFI apertures which are not RAM.
         for (range) |r| {
-            // This starts with us figuring out the start and end pages are
+            for (self.ranges) |tracked| {
+                const intersection_start = @max(r.start, tracked.start);
+                const intersection_end = @min(r.end, tracked.end);
+                if (intersection_start >= intersection_end) continue;
 
-            const start = std.mem.alignForward(u64, r.start, 4096);
-            const end = std.mem.alignBackward(u64, r.end - 1, 4096);
-            if (end < start) {
-                continue;
-                // return PageBitFieldError.InvalidRange;
-            }
-            // we're then going to iterate through each page
-            // as they may lie across multiple ranges
-            var iter = start;
-            while (iter <= end) : (iter += 4096) {
-                // then we're going to get the bit id
-                const bit_id = self.getBitId(iter) catch {
-                    // Range may not be in the space
-                    // therefore we may have an error
-                    // as such we're just going to continue
-                    continue;
+                const start = std.mem.alignForward(u64, intersection_start, 4096);
+                const end = std.mem.alignBackward(u64, intersection_end - 1, 4096);
+                if (end < start) continue;
 
-                } orelse continue;
-
-                if (bit_id.index >= self.bitfield.len) {
-                    return PageBitFieldError.OutOfMemory;
+                var iter = start;
+                while (iter <= end) : (iter += 4096) {
+                    const bit_id = (try self.getBitId(iter)) orelse continue;
+                    if (bit_id.index >= self.bitfield.len) {
+                        return PageBitFieldError.OutOfMemory;
+                    }
+                    const mask: u64 = @as(u64, 1) << @as(u6, @truncate(bit_id.bit));
+                    self.bitfield[bit_id.index] |= mask;
                 }
-                // and set the bit in the bitfield
-                const mask: u64 = @as(u64,1) << @as(u6,@truncate(bit_id.bit));
-                self.bitfield[bit_id.index] |= mask;
             }
         }
+
+        // TODO: Normalize ranges and use binary search for future dynamic
+        // reserve/free operations instead of nested range scans.
     }
 
     /// Returns the bit id of the page at the given address.
