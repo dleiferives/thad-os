@@ -53,8 +53,7 @@ pub fn loadElfProgram(
         return ElfLoaderError.InvalidElf;
     };
 
-    log.info("Parsed elf file",.{});
-
+    log.info("Parsed elf file", .{});
 
     // New mapper
     const base_mapper = kernel.state.mem_manager.mapper.?;
@@ -64,44 +63,38 @@ pub fn loadElfProgram(
     cur_thread.creating_thread_mapper = program_mapper;
     defer mem.Mapper.loadPML4(cur_thread.mapper.pml4_phys_addr);
 
-
     // New memory space
     const program_heap_start = mem.types.MEMORY_LAYOUT.USER_VIRTUAL_HEAP_START;
     const program_heap_size = mem.types.MEMORY_LAYOUT.USER_VIRTUAL_HEAP_INITIAL_END - program_heap_start;
     std.log.err("Program heap size is {} bytes", .{program_heap_size});
 
-
     // swith to the new memory space
     std.log.err("Switching to new memory space", .{});
     mem.Mapper.loadPML4(program_mapper.pml4_phys_addr);
-    try mem.Mapper.initScratchMap(kernel.state.mem_manager.memory_layout.kernel_offset);
-    // try mem.Mapper.initScratchMap(mem.types.MEMORY_LAYOUT.KERNEL_VIRTUAL_START);
+    // createUserAddressSpace copies the kernel half, including the scratch-map
+    // hierarchy. Reinitializing it here would access the newly allocated PML4
+    // through a direct-map page that is not guaranteed to exist.
     std.log.err("New memory space loaded", .{});
 
-    var program_allocator = try mem.allocator.TrackedAllocator.init(
-        program_heap_start,
-        10 * 1024 * 1024, // 10 MiB initial heap size
-        program_mapper,
-        mem.PageFlags{
+    // TODO: Give each address space independent scratch-map bookkeeping. The
+    // current shared kernel mapping is serialized only by loader execution.
+
+    var program_allocator = try mem.allocator.TrackedAllocator.init(program_heap_start, 10 * 1024 * 1024, // 10 MiB initial heap size
+        program_mapper, mem.PageFlags{
             .present = true,
             .writable = true,
             .user_accessible = !is_kernel,
             .demand_alloc = true,
-        },
-        parent_allocator
-    );
-
+        }, parent_allocator);
 
     const program_alloc_wrapper = try program_allocator.createAllocator();
 
     try loadProgramSegments(elf_file, program_mapper, elf_data);
-    try program_mapper.mapDemand(0,
-        mem.PageFlags{
-            .present = true,
-            .writable = true,
-            .user_accessible = !is_kernel,
-            .demand_alloc = true,
-        });
+    // Keep virtual page zero unmapped so null-pointer dereferences fault.
+
+    // TODO: Finish the ring-3 stack and privilege-transition path, then run
+    // ordinary programs with user-accessible segments instead of relying on
+    // the boot-time kernel-program mode used by the current echo program.
 
     // Create thread
     log.info("Creating program thread...", .{});
@@ -171,22 +164,20 @@ fn readElfFile(path: []const u8, allocator: std.mem.Allocator) ElfLoaderError![]
     };
 
     // Read file
-    const all_read = stat.st_size;
-    var buffer: [512]u8 = undefined; // 512 bytes buffer for reading
+    const all_read: usize = stat.st_size;
     var bytes_read: usize = 0;
     while (bytes_read < all_read) {
-
-        const read_size = @min(all_read - bytes_read, buffer.len);
+        const read_size = @min(all_read - bytes_read, 4096);
         std.log.debug("Reading {} bytes from file", .{read_size});
-        _ = vfs.vfs_read(fd, buffer[0..512]) catch {
+        const amount = vfs.vfs_read(fd, file_data[bytes_read..][0..read_size]) catch {
             allocator.free(file_data);
             return ElfLoaderError.LoadError;
         };
-        // for (0..buffer[0..512].len/8) |i| {
-        //     log.debug("{X:0>16}", .{@as(u64, std.mem.bytesToValue(u64, buffer[i*8..(i+1)*8]))});
-        // }
-        @memcpy(file_data[bytes_read..bytes_read + read_size], buffer[0..read_size]);
-        bytes_read += read_size;
+        if (amount == 0) {
+            allocator.free(file_data);
+            return ElfLoaderError.LoadError;
+        }
+        bytes_read += amount;
     }
     // const bytes_read = vfs.vfs_read(fd, file_data) catch {
     //     allocator.free(file_data);
@@ -199,14 +190,7 @@ fn readElfFile(path: []const u8, allocator: std.mem.Allocator) ElfLoaderError![]
         return ElfLoaderError.LoadError;
     }
 
-    // print out the elf data
-    for (0..file_data.len/8) |i| {
-        log.debug("{X:0>16}", .{@as(u64, std.mem.bytesToValue(u64, file_data[i*8..(i+1)*8]))});
-    }
-
-    // @panic("ELF file read complete, returning data");
     return file_data;
-
 }
 
 fn loadProgramSegments(
@@ -239,12 +223,11 @@ fn loadSegment(
     const filesz = phdr.p_filesz;
     const offset = phdr.p_offset;
 
-    log.info("Loading segment: vaddr=0x{X:0>16}, memsz={}, filesz={}, offset={}", .{
-        vaddr, memsz, filesz, offset
-    });
+    log.info("Loading segment: vaddr=0x{X:0>16}, memsz={}, filesz={}, offset={}", .{ vaddr, memsz, filesz, offset });
 
     if (vaddr < mem.types.MEMORY_LAYOUT.VIRTUAL_PROG_START or
-        vaddr + memsz > mem.types.MEMORY_LAYOUT.VIRTUAL_PROG_END) {
+        vaddr + memsz > mem.types.MEMORY_LAYOUT.VIRTUAL_PROG_END)
+    {
         log.err("Segment address out of program space: 0x{X:0>16}", .{vaddr});
         return ElfLoaderError.InvalidSegment;
     }
@@ -260,20 +243,18 @@ fn loadSegment(
     const page_aligned_vaddr = vaddr & ~mem.PAGE_MASK_4K;
     const page_aligned_size = ((vaddr + memsz + mem.PAGE_MASK_4K) & ~mem.PAGE_MASK_4K) - page_aligned_vaddr;
 
-    log.info("Mapping pages: 0x{X:0>16} - 0x{X:0>16} (size={})", .{
-        page_aligned_vaddr, page_aligned_vaddr + page_aligned_size, page_aligned_size
-    });
+    log.info("Mapping pages: 0x{X:0>16} - 0x{X:0>16} (size={})", .{ page_aligned_vaddr, page_aligned_vaddr + page_aligned_size, page_aligned_size });
 
     try mapper.mapRange(page_aligned_vaddr, page_aligned_vaddr + page_aligned_size, flags);
 
     if (filesz > 0) {
-        log.info("Copying {} bytes of data to 0x{X:0>16}", .{filesz, vaddr});
-        try copySegmentData(vaddr, elf_data[offset..offset + filesz]);
+        log.info("Copying {} bytes of data to 0x{X:0>16}", .{ filesz, vaddr });
+        try copySegmentData(vaddr, elf_data[offset .. offset + filesz]);
 
         // VERIFY THE DATA WAS COPIED CORRECTLY
         log.info("Verifying copied data...", .{});
         const verify_ptr: [*]const u8 = @ptrFromInt(vaddr);
-        const expected_data = elf_data[offset..offset + @min(filesz, 16)]; // First 16 bytes
+        const expected_data = elf_data[offset .. offset + @min(filesz, 16)]; // First 16 bytes
         const actual_data = verify_ptr[0..@min(filesz, 16)];
 
         log.info("Expected first 16 bytes: {any}", .{expected_data});
@@ -282,7 +263,7 @@ fn loadSegment(
         // Compare byte by byte
         for (expected_data, 0..) |expected_byte, i| {
             if (actual_data[i] != expected_byte) {
-                log.err("Data mismatch at offset {}: expected 0x{X:0>2}, got 0x{X:0>2}", .{i, expected_byte, actual_data[i]});
+                log.err("Data mismatch at offset {}: expected 0x{X:0>2}, got 0x{X:0>2}", .{ i, expected_byte, actual_data[i] });
                 return ElfLoaderError.LoadError;
             }
         }
@@ -290,7 +271,7 @@ fn loadSegment(
     }
 
     if (memsz > filesz) {
-        log.info("Zeroing {} bytes at 0x{X:0>16}", .{memsz - filesz, vaddr + filesz});
+        log.info("Zeroing {} bytes at 0x{X:0>16}", .{ memsz - filesz, vaddr + filesz });
         try zeroMemory(vaddr + filesz, memsz - filesz);
     }
 

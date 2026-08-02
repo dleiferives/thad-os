@@ -609,12 +609,15 @@ pub const Ex2Filesystem = struct {
         try self.dev.readBlock(block_num, data);
     }
 
-    // TODO @(dleiferives,0dc80541-38c9-48de-a000-efbc0d1f7bdd): add conversion
-    // between block sizes... ~#
     pub fn getBlocksRaw(self: *Self, block: u64, count: u64, data: []u8) !void {
         const block_addr = self.first_block_addr + (block * self.superblock.block_size);
         const block_num = @as(u64, block_addr / self.dev.blk_size);
-        try self.dev.readBlocks(block_num, count * self.dev.blk_size / self.superblock.block_size, data);
+        const byte_count = std.math.mul(u64, count, self.superblock.block_size) catch
+            return error.InvalidArgument;
+        if (byte_count % self.dev.blk_size != 0 or data.len < byte_count) {
+            return error.InvalidArgument;
+        }
+        try self.dev.readBlocks(block_num, byte_count / self.dev.blk_size, data);
     }
 
     pub fn getInode(self: *Self, inode_num: u64) !inode_table_entry {
