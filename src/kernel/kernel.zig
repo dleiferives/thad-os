@@ -102,27 +102,64 @@ pub fn main() !void {
     // state.options.polling_keyboard =true;
     // try arch.cpu.gdt.tester();
 
-    bootStatus("initializing PS/2 controller", .{});
-    var ps2_ctrl = try drivers.ps2.Ps2Controller.init();
-    bootStatus("PS/2 controller ready", .{});
-    log.info("--- PS/2 Controller Initialized ---\n", .{});
+    // Initialize the kernel heap before optional peripheral drivers. Storage
+    // needs it, and storage must be available early enough to persist failures
+    // from input and other later boot stages.
+    bootStatus("initializing kernel heap", .{});
+    try state.initKernelHeap();
+    bootStatus("kernel heap ready", .{});
 
-    // Initialize the Keyboard Manager with the PS/2 Controller
-    var kbd_manager = try drivers.keyboard.KeyboardManager.init(&ps2_ctrl);
-    log.info("--- Keyboard Manager Initialized ---\n", .{});
+    bootStatus("probing AHCI storage", .{});
+    drivers.ahci.init() catch |err| {
+        log.warn("AHCI driver unavailable: {}", .{err});
+    };
+    bootStatus("AHCI probe finished", .{});
+    flushPersistentBootLog() catch |err| {
+        log.warn("Could not persist hardware boot log: {}", .{err});
+    };
 
-    if (kbd_manager.keyboard1 == null and kbd_manager.keyboard2 == null) {
-        log.info("No keyboards detected. Exiting.\n", .{});
-        return;
+    state.ps2_ctrl = null;
+    state.keyboard_manager = null;
+    var ps2_ctrl_storage: drivers.ps2.Ps2Controller = undefined;
+    var kbd_manager_storage: drivers.keyboard.KeyboardManager = undefined;
+    if (hasBootFlag("thad-macbook41")) {
+        // MacBook4,1 exposes its built-in keyboard and trackpad as USB devices;
+        // touching an absent/firmware-emulated i8042 controller can stall boot.
+        bootStatus("PS/2 skipped; USB input required", .{});
+        // TODO: Add UHCI/EHCI enumeration and a USB HID boot-keyboard backend,
+        // then feed its key events into KeyboardBuffer.
+        // TODO: Parse the ACPI FADT i8042 boot-architecture flag instead of
+        // relying on a machine-specific kernel command-line flag.
+    } else if (drivers.ps2.Ps2Controller.init()) |controller| {
+        ps2_ctrl_storage = controller;
+        bootStatus("PS/2 controller ready", .{});
+        log.info("--- PS/2 Controller Initialized ---\n", .{});
+
+        if (drivers.keyboard.KeyboardManager.init(&ps2_ctrl_storage)) |manager| {
+            kbd_manager_storage = manager;
+            log.info("--- Keyboard Manager Initialized ---\n", .{});
+            if (kbd_manager_storage.keyboard1 == null and
+                kbd_manager_storage.keyboard2 == null)
+            {
+                bootStatus("PS/2 has no keyboard; continuing", .{});
+            } else {
+                state.keyboard_manager = &kbd_manager_storage;
+                state.ps2_ctrl = &ps2_ctrl_storage;
+                try drivers.keyboard.setup_irq(&ps2_ctrl_storage, &kbd_manager_storage);
+            }
+        } else |err| {
+            log.warn("Keyboard manager unavailable: {}", .{err});
+            bootStatus("PS/2 keyboard unavailable; continuing", .{});
+        }
+    } else |err| {
+        log.warn("PS/2 controller unavailable: {}", .{err});
+        bootStatus("PS/2 unavailable; continuing", .{});
     }
 
-    state.keyboard_manager = &kbd_manager;
-    state.ps2_ctrl = &ps2_ctrl;
-
-    if (state.options.polling_keyboard) {
+    if (state.options.polling_keyboard and state.keyboard_manager != null) {
         log.info("Starting keyboard input polling. Press keys to see them on screen. (Ctrl+C won't work here!)\n", .{});
         while (true) {
-            kbd_manager.pollAndProcessInput();
+            state.keyboard_manager.?.pollAndProcessInput();
 
             // Add a small delay to prevent hogging CPU in a polling loop
             var i: u32 = 0;
@@ -131,12 +168,6 @@ pub fn main() !void {
             }
         }
     }
-    try drivers.keyboard.setup_irq(&ps2_ctrl, &kbd_manager);
-
-    // Initialize kernel heap
-    bootStatus("initializing kernel heap", .{});
-    try state.initKernelHeap();
-    bootStatus("kernel heap ready", .{});
 
     if (state.testing.allocator) {
         if (state.getKernelAllocator()) |alloc| {
@@ -331,9 +362,14 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
     _ = arg;
 
     // Create keyboard I/O test thread
-    drivers.keyboard.KeyboardBuffer.setup_irq(state.ps2_ctrl.?, state.keyboard_manager.?) catch {
-        @panic("Failed to setup keyboard IRQ");
-    };
+    if (state.ps2_ctrl != null and state.keyboard_manager != null) {
+        drivers.keyboard.KeyboardBuffer.setup_irq(
+            state.ps2_ctrl.?,
+            state.keyboard_manager.?,
+        ) catch |err| {
+            log.warn("Failed to switch PS/2 keyboard to buffered IRQ input: {}", .{err});
+        };
+    }
     // const kbd_thread = thread.Thread.create(
     //     &keyboardIOThread,
     //     null,
@@ -376,14 +412,15 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         log.info("Scheduler changed to RunToCompletionScheduler", .{});
     }
 
-    bootStatus("probing AHCI storage", .{});
+    // AHCI normally came up before optional input initialization so boot
+    // failures could already be persisted. Keep this idempotent call for
+    // configurations where early initialization was unavailable.
     drivers.ahci.init() catch |err| {
         log.warn("AHCI driver unavailable: {}", .{err});
     };
     flushPersistentBootLog() catch |err| {
         log.warn("Could not persist hardware boot log: {}", .{err});
     };
-    bootStatus("AHCI probe finished", .{});
 
     drivers.ata.init() catch |err| {
         // Some EFI systems expose their SATA disk only through AHCI. A GRUB
@@ -599,12 +636,21 @@ fn mapBootFramebuffer(framebuffer: BootFramebuffer) !void {
 }
 
 fn bootStatus(comptime format: []const u8, args: anytype) void {
+    var writer = persistentBootLogWriter();
+    writer.print("[boot] " ++ format ++ "\n", args) catch {};
+
+    // Once AHCI is online, make each checkpoint survive a reset. This is
+    // intentionally synchronous while diagnosing early physical-hardware boot.
+    if (drivers.ahci.isReady()) {
+        flushPersistentBootLog() catch {};
+    }
+
     if (!drivers.vga.hasFramebuffer()) return;
     drivers.vga.setColor(.LIGHT_GRAY, .BLACK);
     drivers.vga.print("[boot] " ++ format ++ "\n", args) catch {};
 
-    // TODO: Preserve these checkpoints in an in-memory boot log so failures
-    // can be inspected after adding persistent crash-dump support.
+    // TODO: Batch routine boot-log checkpoints once physical bring-up is
+    // stable instead of synchronously rewriting the diagnostic region.
 }
 
 pub const Kernel = struct {

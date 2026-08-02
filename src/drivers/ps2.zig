@@ -3,9 +3,14 @@ const std = @import("std");
 const log = std.log.scoped(.drivers_ps2);
 const log_verbose = std.log.scoped(.drivers_ps2_verbose);
 
-/// for busy waiting... which I should remove
-pub const DEFAULT_TIMEOUT_ITERATIONS: u32 = 100_000_00;
+/// Bounded busy-wait used while the scheduler and timer facilities may not yet
+/// be available during early boot.
+pub const DEFAULT_TIMEOUT_ITERATIONS: u32 = 10_000_000;
 
+// TODO: Replace iteration-count timeouts with monotonic timer deadlines so
+// behavior does not vary dramatically with CPU speed.
+// TODO: Move device reset and identification out of the synchronous boot path;
+// slow or broken legacy devices should not delay unrelated subsystem startup.
 
 pub const Ps2Error = error{
     Timeout,
@@ -385,7 +390,7 @@ pub const Ps2Controller = struct {
             if ((self.status_port.read() & ps2.STATUS_OUTPUT_BUFFER_FULL) != 0) {
                 return;
             }
-            asm volatile ( "" :::);
+            asm volatile ("");
         }
         return Ps2Error.Timeout;
     }
