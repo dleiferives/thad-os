@@ -235,6 +235,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "test_threading_snakes", test_threading_snakes);
     options.addOption(bool, "test_threading_snakes_hungry", test_threading_snakes_hungry);
     options.addOption(bool, "test_change_scheduler", test_change_scheduler);
+    options.addOption(bool, "macbook_early_fb", macbook_early_fb);
     kernel.addOptions("config", options);
 
     const boot_options = b.addOptions();

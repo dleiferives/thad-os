@@ -57,3 +57,5 @@ grep -q "Mounting ext2 filesystem as VFS root" "$serial_log"
 grep -q "Successfully processed entire file" "$serial_log"
 grep -q "ELF program loaded successfully" "$serial_log"
 grep -q "Putc syscall invoked with char: 62" "$serial_log"
+dd if="$test_dir/root-gpt.img" bs=512 skip=260096 count=2 2>/dev/null |
+    grep -q "Zig kernel entered"

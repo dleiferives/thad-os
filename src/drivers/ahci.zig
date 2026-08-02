@@ -51,6 +51,8 @@ const SATA_SIG_ATA: u32 = 0x0000_0101;
 const FIS_TYPE_REG_H2D: u8 = 0x27;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
 const ATA_CMD_READ_DMA_EXT: u8 = 0x25;
+const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
+const ATA_CMD_FLUSH_CACHE_EXT: u8 = 0xEA;
 
 const COMMAND_LIST_SIZE = 1024;
 const RECEIVED_FIS_SIZE = 256;
@@ -343,7 +345,7 @@ fn stopCommandEngine(controller_: *const Controller) !void {
 }
 
 fn identifyDevice(controller_: *const Controller) !u64 {
-    try issueCommand(controller_, ATA_CMD_IDENTIFY, 0, 1, 512);
+    try issueCommand(controller_, ATA_CMD_IDENTIFY, 0, 1, 512, false);
     const words: *const [256]u16 = @ptrCast(@alignCast(&dma_buffer));
     if (words[83] & (1 << 10) == 0) return AhciError.Lba48NotSupported;
     return @as(u64, words[100]) |
@@ -362,8 +364,9 @@ fn issueCommand(
     lba: u64,
     sector_count: u16,
     byte_count: usize,
+    write_to_device: bool,
 ) !void {
-    if (byte_count == 0 or byte_count > DMA_BUFFER_SIZE) return AhciError.DeviceTooSmall;
+    if (byte_count > DMA_BUFFER_SIZE) return AhciError.DeviceTooSmall;
 
     var remaining = POLL_LIMIT;
     while (remaining > 0 and readPort(controller_, PORT_TFD) & (TFD_BSY | TFD_DRQ) != 0) : (remaining -= 1) {
@@ -382,7 +385,9 @@ fn issueCommand(
     @memset(&command_list, 0);
     @memset(&command_table, 0);
     const table_phys = physicalAddress(&command_table);
-    putU32(command_list[0..], 0, 5 | (1 << 16)); // CFL=5 DWORDs, PRDTL=1.
+    const write_flag: u32 = if (write_to_device) 1 << 6 else 0;
+    const prdt_length: u32 = if (byte_count == 0) 0 else 1;
+    putU32(command_list[0..], 0, 5 | write_flag | (prdt_length << 16));
     putU32(command_list[0..], 8, @truncate(table_phys));
     putU32(command_list[0..], 12, @truncate(table_phys >> 32));
 
@@ -399,10 +404,12 @@ fn issueCommand(
     command_table[12] = @truncate(sector_count);
     command_table[13] = @truncate(sector_count >> 8);
 
-    const data_phys = physicalAddress(&dma_buffer);
-    putU32(command_table[0..], 128, @truncate(data_phys));
-    putU32(command_table[0..], 132, @truncate(data_phys >> 32));
-    putU32(command_table[0..], 140, @as(u32, @intCast(byte_count - 1)) | (1 << 31));
+    if (byte_count != 0) {
+        const data_phys = physicalAddress(&dma_buffer);
+        putU32(command_table[0..], 128, @truncate(data_phys));
+        putU32(command_table[0..], 132, @truncate(data_phys >> 32));
+        putU32(command_table[0..], 140, @as(u32, @intCast(byte_count - 1)) | (1 << 31));
+    }
 
     writePort(controller_, PORT_IS, 0xFFFF_FFFF);
     asm volatile ("" ::: "memory");
@@ -471,7 +478,7 @@ fn blockReadMultiple(
     while (sectors_remaining > 0) {
         const chunk: u16 = @intCast(@min(sectors_remaining, MAX_SECTORS_PER_COMMAND));
         const chunk_bytes = @as(usize, chunk) * 512;
-        issueCommand(controller_, ATA_CMD_READ_DMA_EXT, current_lba, chunk, chunk_bytes) catch |err| {
+        issueCommand(controller_, ATA_CMD_READ_DMA_EXT, current_lba, chunk, chunk_bytes, false) catch |err| {
             log.err("AHCI read failed at LBA {}: {}", .{ current_lba, err });
             return block_device.BlockDevError.DeviceError;
         };
@@ -484,4 +491,38 @@ fn blockReadMultiple(
 
     // TODO: Make BlockDev requests asynchronous so callers can overlap I/O
     // with computation instead of blocking a kernel thread.
+}
+
+pub fn isReady() bool {
+    return controller != null;
+}
+
+/// Overwrites already-reserved sectors without changing filesystem metadata.
+/// Callers must ensure the range belongs exclusively to a fixed diagnostic
+/// file or another reserved on-disk area.
+pub fn writeAbsoluteSectors(start_lba: u64, data: []const u8) !void {
+    const controller_ = &(controller orelse return AhciError.ControllerNotFound);
+    if (data.len == 0 or data.len % 512 != 0) return AhciError.DeviceTooSmall;
+    const sector_total = data.len / 512;
+    if (start_lba + sector_total > controller_.sector_count) return AhciError.DeviceTooSmall;
+
+    io_mutex.lock();
+    defer io_mutex.unlock();
+
+    var sectors_remaining = sector_total;
+    var current_lba = start_lba;
+    var input_offset: usize = 0;
+    while (sectors_remaining > 0) {
+        const chunk: u16 = @intCast(@min(sectors_remaining, MAX_SECTORS_PER_COMMAND));
+        const chunk_bytes = @as(usize, chunk) * 512;
+        @memcpy(dma_buffer[0..chunk_bytes], data[input_offset..][0..chunk_bytes]);
+        try issueCommand(controller_, ATA_CMD_WRITE_DMA_EXT, current_lba, chunk, chunk_bytes, true);
+        current_lba += chunk;
+        sectors_remaining -= chunk;
+        input_offset += chunk_bytes;
+    }
+    try issueCommand(controller_, ATA_CMD_FLUSH_CACHE_EXT, 0, 0, 0, false);
+
+    // TODO: Add read-after-write verification and retain two generation-tagged
+    // log slots so a torn write cannot destroy the previous boot record.
 }

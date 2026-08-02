@@ -39,6 +39,18 @@ comptime {
         "\ncld\nmovl $0x00FF00FF, %eax\nmovl $0xA0000000, %edi\nmovl $1638400, %ecx\nrep stosl\n"
     else
         "\n";
+    const macbook_long_mode_marker = if (config.macbook_early_fb)
+        "\nmovl $0x0000FF00, %eax\nmovl $0xA0000000, %edi\nmovl $163840, %ecx\nrep stosl\n"
+    else
+        "\n";
+    const macbook_higher_half_marker = if (config.macbook_early_fb)
+        "\nmovl $0x000000FF, %eax\nmovabs $0xFFFFFF80A00A0000, %rdi\nmovl $163840, %ecx\nrep stosl\n"
+    else
+        "\n";
+    const macbook_tlb_marker = if (config.macbook_early_fb)
+        "\nmovl $0x0000FFFF, %eax\nmovabs $0xFFFFFF80A0140000, %rdi\nmovl $163840, %ecx\nrep stosl\n"
+    else
+        "\n";
 
     asm (
     // setup the multiboot header
@@ -128,6 +140,8 @@ comptime {
         \\ .align 8
         \\ .code64
         \\ long_mode_start:
+        // Green: the CPU successfully entered 64-bit long mode.
+        ++ macbook_long_mode_marker ++
         \\ movw $0x10, %ax
         \\ movw %ax, %ss
         \\ movw %ax, %ds
@@ -147,6 +161,9 @@ comptime {
         \\ movq $0xFFFFFF8000000000, %rax
         \\ addq %rax, %rsp
 
+        // Blue: the higher-half jump and stack relocation succeeded.
+        ++ macbook_higher_half_marker ++
+
         // Unmap the lower memory..
         \\ movq $0, %rax                  # Value to write (0)
         \\ movabs $BootP4, %rbx           # Load the 64-bit address of BootP4 into RBX
@@ -156,6 +173,9 @@ comptime {
         // this is so that the tlb gets flushed
         \\ movq %cr3, %rax
         \\ movq %rax, %cr3
+
+        // Cyan: the low mapping was removed and the TLB was reloaded.
+        ++ macbook_tlb_marker ++
 
         // Reload other things witht he higher half stuff too
         \\ movabs $BootGDTPtr, %rax
@@ -209,7 +229,9 @@ comptime {
         \\ .align 4096
         \\ BootP3:
         \\ .quad BootP2 - 0xFFFFFF8000000000 + ((1 << 0) | (1 << 1))
-        \\ .rept 512 - 1
+        \\ .quad 0
+        \\ .quad BootFramebufferP2 - 0xFFFFFF8000000000 + ((1 << 0) | (1 << 1))
+        \\ .rept 512 - 3
         \\ .quad 0
         \\ .endr
         \\
@@ -219,6 +241,21 @@ comptime {
         \\ .rept 512
         \\ .quad (i << 21) + ((1 << 0) | (1 << 1) | (1 << 7))
         \\ .set i, i+1
+        \\ .endr
+
+        // Map only the 8 MiB GM965 scanout window needed by the early marker.
+        \\ .align 4096
+        \\ BootFramebufferP2:
+        \\ .rept 256
+        \\ .quad 0
+        \\ .endr
+        \\ .set i, 256
+        \\ .rept 4
+        \\ .quad 0x80000000 + (i << 21) + ((1 << 0) | (1 << 1) | (1 << 4) | (1 << 7))
+        \\ .set i, i+1
+        \\ .endr
+        \\ .rept 252
+        \\ .quad 0
         \\ .endr
     );
 

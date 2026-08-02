@@ -134,8 +134,8 @@ pub const CommandLineTag = extern struct {
             if (std.mem.startsWith(u8, token, name)) {
                 if (token.len > name.len and token[name.len] == '=') {
                     const value = token[name.len + 1 ..];
-                    const len = std.math.min(value.len, buffer.len);
-                    std.mem.copy(u8, buffer[0..len], value[0..len]);
+                    const len = @min(value.len, buffer.len);
+                    @memcpy(buffer[0..len], value[0..len]);
                     return buffer[0..len];
                 } else {
                     return "";

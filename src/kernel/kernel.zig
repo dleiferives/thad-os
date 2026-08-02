@@ -66,19 +66,26 @@ pub fn main() !void {
         state.testing.change_scheduler = config.test_change_scheduler;
     }
 
+    initMacbookEarlyConsole();
+    macbookEarlyLog("[entry] Zig kernel entered\n");
     try state.mem_layout_init();
+    macbookEarlyLog("[memory] layout metadata ready\n");
     arch.cpu.gdt.init();
+    macbookEarlyLog("[cpu] GDT ready\n");
 
     // Initialize interrupt system
     try arch.irq.irq.init();
     arch.irq.irq.enable();
+    macbookEarlyLog("[cpu] IDT and interrupts ready\n");
     // Initilize the VGA driver
     state.vga_init(0xb8000);
 
     // Initialize the serial driver
     state.serial_log_init(drivers.serial_log.DEFAULT_BAUDRATE, .COM1);
+    macbookEarlyLog("[console] legacy devices initialized\n");
 
     // Initilize the memory manager
+    macbookEarlyLog("[memory] entering page-map rebuild...\n");
     try state.mem_manager_init();
     initBootFramebuffer() catch |err| {
         log.warn("Framebuffer console unavailable: {}", .{err});
@@ -250,6 +257,37 @@ pub fn main() !void {
     }
 }
 
+fn initMacbookEarlyConsole() void {
+    if (!config.macbook_early_fb) return;
+    drivers.vga.init(0xFFFF_FF80_000B_8000);
+    drivers.vga.initFramebuffer(
+        0xFFFF_FF80_A000_0000,
+        1280,
+        800,
+        8192,
+        32,
+        16,
+        8,
+        8,
+        8,
+        0,
+        8,
+    ) catch return;
+    drivers.vga.clear();
+    drivers.vga.setColor(.LIGHT_CYAN, .BLACK);
+    drivers.vga.putStrEarly("THAD-OS EARLY BOOT LOG\n\n");
+
+    // TODO: Feed this early console from a structured ring buffer so messages
+    // can be replayed to later console and persistent diagnostic backends.
+}
+
+fn macbookEarlyLog(message: []const u8) void {
+    recordPersistentBootLog(message);
+    if (!config.macbook_early_fb or !drivers.vga.hasFramebuffer()) return;
+    drivers.vga.setColor(.LIGHT_GRAY, .BLACK);
+    drivers.vga.putStrEarly(message);
+}
+
 pub fn keyboardIOThread(arg: *allowzero anyopaque) callconv(.C) i32 {
     _ = arg;
     log.info("Keyboard I/O thread started - type characters to see them echoed", .{});
@@ -342,6 +380,9 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
     drivers.ahci.init() catch |err| {
         log.warn("AHCI driver unavailable: {}", .{err});
     };
+    flushPersistentBootLog() catch |err| {
+        log.warn("Could not persist hardware boot log: {}", .{err});
+    };
     bootStatus("AHCI probe finished", .{});
 
     drivers.ata.init() catch |err| {
@@ -418,6 +459,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
             }
 
             bootStatus("root mounted; starting arcade", .{});
+            flushPersistentBootLog() catch {};
             arcade.run();
         }
     }
@@ -449,6 +491,13 @@ fn hasBootFlag(flag: []const u8) bool {
     const header = iterator.next() orelse return false;
     const command_line: *const multiboot.CommandLineTag = @ptrCast(@alignCast(header));
     return command_line.hasFlag(flag);
+}
+
+fn getBootParam(name: []const u8, buffer: []u8) ?[]const u8 {
+    var iterator = state.multiboot_info.getTagTypeIterator(.COMMAND_LINE);
+    const header = iterator.next() orelse return null;
+    const command_line: *const multiboot.CommandLineTag = @ptrCast(@alignCast(header));
+    return command_line.getParam(name, buffer);
 }
 
 fn initBootFramebuffer() !void {
@@ -706,6 +755,67 @@ pub const Kernel = struct {
 };
 
 pub var state: Kernel = undefined;
+const persistent_boot_log_capacity = 64 * 1024;
+var persistent_boot_log: [persistent_boot_log_capacity]u8 = [_]u8{0} ** persistent_boot_log_capacity;
+var persistent_boot_log_len: usize = 0;
+
+fn persistentBootLogWrite(_: void, bytes: []const u8) error{}!usize {
+    const available = persistent_boot_log.len - persistent_boot_log_len;
+    const copy_length = @min(available, bytes.len);
+    @memcpy(
+        persistent_boot_log[persistent_boot_log_len..][0..copy_length],
+        bytes[0..copy_length],
+    );
+    persistent_boot_log_len += copy_length;
+    return bytes.len;
+}
+
+fn persistentBootLogWriter() std.io.Writer(void, error{}, persistentBootLogWrite) {
+    return .{ .context = {} };
+}
+
+fn recordPersistentBootLog(message: []const u8) void {
+    _ = persistentBootLogWrite({}, message) catch {};
+}
+
+fn flushPersistentBootLog() !void {
+    if (!drivers.ahci.isReady()) return error.PersistentStorageUnavailable;
+    @memset(persistent_boot_log[persistent_boot_log_len..], 0);
+
+    const parameter_names = [_][]const u8{
+        "thad-log0",
+        "thad-log1",
+        "thad-log2",
+        "thad-log3",
+    };
+    var source_offset: usize = 0;
+    for (parameter_names) |name| {
+        var parameter_buffer: [48]u8 = undefined;
+        const value = getBootParam(name, &parameter_buffer) orelse
+            return error.PersistentLogExtentMissing;
+        var fields = std.mem.splitScalar(u8, value, ':');
+        const lba_text = fields.next() orelse return error.InvalidPersistentLogExtent;
+        const sectors_text = fields.next() orelse return error.InvalidPersistentLogExtent;
+        if (fields.next() != null) return error.InvalidPersistentLogExtent;
+        const lba = try std.fmt.parseInt(u64, lba_text, 10);
+        const sectors = try std.fmt.parseInt(usize, sectors_text, 10);
+        const byte_count = std.math.mul(usize, sectors, 512) catch
+            return error.InvalidPersistentLogExtent;
+        if (source_offset + byte_count > persistent_boot_log.len) {
+            return error.InvalidPersistentLogExtent;
+        }
+        try drivers.ahci.writeAbsoluteSectors(
+            lba,
+            persistent_boot_log[source_offset..][0..byte_count],
+        );
+        source_offset += byte_count;
+    }
+    if (source_offset != persistent_boot_log.len) return error.PersistentLogSizeMismatch;
+
+    // TODO: Add synchronization around the RAM log before multiple kernel
+    // threads are allowed to emit and persist messages concurrently.
+}
+
 var panic_buffer: [1024]u8 = undefined;
 var panic_allocator: std.mem.Allocator = undefined;
 /// helpers
@@ -732,6 +842,7 @@ pub fn panic(msg: []const u8, trace: ?*std.builtin.StackTrace, return_address: ?
 }
 
 pub fn print(comptime format: []const u8, args: anytype) void {
+    persistentBootLogWriter().print(format, args) catch {};
     // Print logging protect via disabling interrupts
     // arch.cpu.cli();
     if (drivers.vga.initialized) {

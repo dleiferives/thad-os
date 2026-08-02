@@ -221,6 +221,13 @@ pub fn putChar(ch: u8) void {
     // TODO @(dleiferives,862ce5ad-e65c-45a7-969d-aa49222a8014): add cli and sti
     // here ~#
     arch.irq.irq.disable();
+    putCharEarly(ch);
+    arch.irq.irq.enable();
+}
+
+/// Writes while leaving interrupt state untouched. This is used by the early
+/// framebuffer console before the IDT is ready.
+pub fn putCharEarly(ch: u8) void {
     switch (ch) {
         '\n' => {
             column = 0;
@@ -265,13 +272,16 @@ pub fn putChar(ch: u8) void {
 
         row = HEIGHT - 1;
     }
-    arch.irq.irq.enable();
 }
 
 pub fn putStr(str: []const u8) void {
     for (str) |ch| {
         putChar(ch);
     }
+}
+
+pub fn putStrEarly(str: []const u8) void {
+    for (str) |ch| putCharEarly(ch);
 }
 
 fn writerFn(_: void, bytes: []const u8) error{}!usize {
