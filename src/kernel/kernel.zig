@@ -678,7 +678,7 @@ pub const Kernel = struct {
             return;
         }
         self.multiboot_info_init();
-        self.multiboot_info.dumpInfo(drivers.serial_log.writer(self.stdio_port)) catch {};
+        recordPersistentBootLog("[memory] Multiboot tags located\n");
         try self.mem_manager.init(self.multiboot_info, self.testing.page_bitfield);
         self.initilized.mem_manager = true;
     }

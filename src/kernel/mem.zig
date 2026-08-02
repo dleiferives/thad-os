@@ -5,6 +5,7 @@ pub const allocator = @import("mem/allocator.zig");
 const multiboot = @import("multiboot.zig");
 const PageBitField = @import("mem/page_bitfield.zig").PageBitField;
 const elf = @import("elf.zig");
+const drivers = @import("drivers");
 
 const log = std.log.scoped(.mem);
 const verbose_log = std.log.scoped(.mem_verbose);
@@ -17,6 +18,15 @@ const mapper_translate_log = std.log.scoped(.mem_manager_mapper_translate);
 var scratch_pdpt: PageTable align(4096) = undefined;
 var scratch_pd: PageTable align(4096) = undefined;
 var scratch_pt: PageTable align(4096) = undefined;
+
+fn bootPhase(message: []const u8) void {
+    if (!drivers.vga.hasFramebuffer()) return;
+    drivers.vga.setColor(.LIGHT_GREEN, .BLACK);
+    drivers.vga.putStrEarly("[page-map] ");
+    drivers.vga.setColor(.LIGHT_GRAY, .BLACK);
+    drivers.vga.putStrEarly(message);
+    drivers.vga.putStrEarly("\n");
+}
 
 pub export fn memset(dest: [*]u8, value: u8, count: usize) [*]u8 {
     var i: usize = 0;
@@ -76,6 +86,7 @@ pub const Manager = struct {
 
     pub fn init(self: *Manager, multiboot_info: multiboot.Multiboot2Info, test_bitfield_before_page_switch: bool) !void {
         manager_log.info("Initializing memory manager", .{});
+        bootPhase("parsing firmware memory map");
         // TODO @(dleiferives,50b1d32d-0557-4ce9-875c-a5da623b95e7): Add the physical
         // mappings from the multiboot header into the manager and then the ones from the
         // layout ~#
@@ -148,6 +159,7 @@ pub const Manager = struct {
             });
         }
 
+        bootPhase("normalizing usable and reserved ranges");
         manager_log.debug("Starting cleaning up physical ranges", .{});
 
         // add back the reserved virtual ranges to the reserved physical ranges
@@ -201,7 +213,9 @@ pub const Manager = struct {
         }
 
         manager_log.debug("Starting to create the page bitfield", .{});
+        bootPhase("building physical-page bitmap");
         self.page_bitfield = try PageBitField.init(self.internal_allocator, a_physical_clean.items[0..]);
+        bootPhase("applying reserved ranges");
         try self.page_bitfield.reserveRanges(self.reserved_physical_ranges);
 
         if (test_bitfield_before_page_switch) {
@@ -211,6 +225,7 @@ pub const Manager = struct {
         manager_log.info("Page bitfield created with {} pages and {} reserved ", .{ self.page_bitfield.pages, self.page_bitfield.getReserved() });
 
         manager_log.info("Starting to create the Mapper", .{});
+        bootPhase("creating replacement PML4");
         // #1 - Get the current page table, and figure out if its  physical or virtual address.
         const current_page_table_add: u64 = Mapper.currentPML4();
         std.log.debug("The current page table is 0x{X:0>16}", .{current_page_table_add});
@@ -228,6 +243,7 @@ pub const Manager = struct {
 
         // --- Map essential kernel regions into the new_mapper ---
         manager_log.info("Mapping kernel regions into new address space...", .{});
+        bootPhase("mapping early kernel direct range");
         var current_phys: u64 = 0;
         var current_virt = self.memory_layout.kernel_offset;
         const direct_map_end = std.mem.alignForward(
@@ -257,6 +273,7 @@ pub const Manager = struct {
             self.memory_layout.kernel_physical_address_start, self.memory_layout.kernel_physical_address_end,
             self.memory_layout.kernel_virtual_address_start,  self.memory_layout.kernel_virtual_address_end,
         });
+        bootPhase("mapping Multiboot information");
 
         // // Map VGA buffer
         // const vga_phys_addr: u64 = 0xB8000;
@@ -298,6 +315,7 @@ pub const Manager = struct {
         const mma_buffer_phys_start = mma_buffer_virt_start - self.memory_layout.kernel_offset; // Assuming it's in higher half
         var mma_offset: u64 = 0;
         manager_log.info("Mapping memory_manager_allocation_buffer (virt: 0x{x}, phys: 0x{x}, size: 0x{x})", .{ mma_buffer_virt_start, mma_buffer_phys_start, @sizeOf(@TypeOf(memory_manager_allocation_buffer)) });
+        bootPhase("mapping memory-manager workspace");
         while (mma_offset < @sizeOf(@TypeOf(memory_manager_allocation_buffer))) {
             const map_virt = (mma_buffer_virt_start + mma_offset) & ~pmask_4k;
             const map_phys = (mma_buffer_phys_start + mma_offset) & ~pmask_4k;
@@ -321,6 +339,7 @@ pub const Manager = struct {
                 PageFlags{ .writable = true, .execute_disable = true },
             );
         }
+        bootPhase("switching to replacement page map");
         // new_mapper.scratchmapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
         // const pml4_virt: *PageMapLevel4 = new_mapper.scratchMapVirt(new_mapper.pml4_phys_addr, PageMapLevel4);
         // defer new_mapper.scratchMapDemap(new_mapper.pml4_phys_addr);
