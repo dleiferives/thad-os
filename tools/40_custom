@@ -4,6 +4,7 @@ exec tail -n +3 $0
 menuentry "thad-os" {
     insmod part_gpt
     insmod ext2
+    insmod multiboot2
     insmod all_video
     set gfxmode=1280x800x32,1024x768x32,auto
     set gfxpayload=keep
