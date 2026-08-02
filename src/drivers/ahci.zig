@@ -14,6 +14,7 @@ const PCI_PROGIF_AHCI: u8 = 0x01;
 const HBA_CAP: usize = 0x00;
 const HBA_GHC: usize = 0x04;
 const HBA_PI: usize = 0x0C;
+const HBA_VS: usize = 0x10;
 const HBA_CAP2: usize = 0x24;
 const HBA_BOHC: usize = 0x28;
 const HBA_PORTS: usize = 0x100;
@@ -47,6 +48,7 @@ const TFD_ERR: u32 = 1 << 0;
 const TFD_DRQ: u32 = 1 << 3;
 const TFD_BSY: u32 = 1 << 7;
 const SATA_SIG_ATA: u32 = 0x0000_0101;
+const AHCI_VERSION_1_2: u32 = 0x0001_0200;
 
 const FIS_TYPE_REG_H2D: u8 = 0x27;
 const ATA_CMD_IDENTIFY: u8 = 0xEC;
@@ -136,8 +138,10 @@ pub fn init() !void {
         .sector_count = 0,
     };
 
+    const version = readHba(&candidate, HBA_VS);
+    kernel.hardwareBootStatus("AHCI: specification version 0x{x}", .{version});
     kernel.hardwareBootStatus("AHCI: requesting firmware handoff", .{});
-    try biosHandoff(&candidate);
+    try biosHandoff(&candidate, version);
     kernel.hardwareBootStatus("AHCI: firmware handoff complete", .{});
     writeHba(&candidate, HBA_GHC, readHba(&candidate, HBA_GHC) | GHC_AE);
 
@@ -290,7 +294,10 @@ fn writePort(controller_: *const Controller, offset: usize, value: u32) void {
     writeHba(controller_, portOffset(controller_, offset), value);
 }
 
-fn biosHandoff(controller_: *const Controller) !void {
+fn biosHandoff(controller_: *const Controller, version: u32) !void {
+    // CAP2 and BOHC were introduced in AHCI 1.2. In AHCI 1.1 these offsets
+    // are reserved and must not be interpreted as capability registers.
+    if (version < AHCI_VERSION_1_2) return;
     if (readHba(controller_, HBA_CAP2) & CAP2_BOH == 0) return;
     writeHba(controller_, HBA_BOHC, readHba(controller_, HBA_BOHC) | BOHC_OOS);
     var remaining = POLL_LIMIT;
@@ -302,6 +309,8 @@ fn biosHandoff(controller_: *const Controller) !void {
     return AhciError.BiosHandoffTimeout;
 
     // TODO: Replace iteration-count timeouts with monotonic clock deadlines.
+    // TODO: Record the final BOHC value on timeout so firmware ownership bugs
+    // can be diagnosed without attaching a hardware debugger.
 }
 
 fn findSataPort(controller_: *Controller, implemented: u32) ?u8 {
