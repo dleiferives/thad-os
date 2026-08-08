@@ -100,7 +100,7 @@ comptime {
 
         // This marker runs before thad-os constructs page tables, so it can
         // distinguish entry failures from later VM/driver failures.
-        ++ macbook_early_marker ++
+    ++ macbook_early_marker ++
 
         // Save the location of the multiboot info structure
         \\ movl %ebx, (multiboot_info_ptr - 0xFFFFFF8000000000)
@@ -141,7 +141,7 @@ comptime {
         \\ .code64
         \\ long_mode_start:
         // Green: the CPU successfully entered 64-bit long mode.
-        ++ macbook_long_mode_marker ++
+    ++ macbook_long_mode_marker ++
         \\ movw $0x10, %ax
         \\ movw %ax, %ss
         \\ movw %ax, %ds
@@ -162,7 +162,7 @@ comptime {
         \\ addq %rax, %rsp
 
         // Blue: the higher-half jump and stack relocation succeeded.
-        ++ macbook_higher_half_marker ++
+    ++ macbook_higher_half_marker ++
 
         // Unmap the lower memory..
         \\ movq $0, %rax                  # Value to write (0)
@@ -175,7 +175,7 @@ comptime {
         \\ movq %rax, %cr3
 
         // Cyan: the low mapping was removed and the TLB was reloaded.
-        ++ macbook_tlb_marker ++
+    ++ macbook_tlb_marker ++
 
         // Reload other things witht he higher half stuff too
         \\ movabs $BootGDTPtr, %rax
@@ -243,7 +243,7 @@ comptime {
         \\ .set i, i+1
         \\ .endr
 
-        // Map only the 8 MiB GM965 scanout window needed by the early marker.
+        // Map the 8 MiB GM965 scanout window needed by the early marker.
         \\ .align 4096
         \\ BootFramebufferP2:
         \\ .rept 256
@@ -254,7 +254,14 @@ comptime {
         \\ .quad 0x80000000 + (i << 21) + ((1 << 0) | (1 << 1) | (1 << 4) | (1 << 7))
         \\ .set i, i+1
         \\ .endr
-        \\ .rept 252
+        // MacBook4,1 ICH8M AHCI ABAR 0xB0704000 lies in this 2 MiB page.
+        // Keeping the entry in this Mac-specific bootstrap profile lets the
+        // hardware driver avoid modifying retained firmware page tables.
+        \\ .rept 127
+        \\ .quad 0
+        \\ .endr
+        \\ .quad 0x80000000 + (387 << 21) + ((1 << 0) | (1 << 1) | (1 << 4) | (1 << 7))
+        \\ .rept 124
         \\ .quad 0
         \\ .endr
     );
@@ -262,4 +269,6 @@ comptime {
     // TODO: Replace the compile-time Mac framebuffer marker with a generic
     // early-console abstraction once Multiboot tags can be parsed before VM
     // initialization.
+    // TODO: Replace the fixed Mac AHCI bootstrap mapping with a generic early
+    // MMIO mapper after retained page-table mutation works on this firmware.
 }

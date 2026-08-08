@@ -253,6 +253,16 @@ fn mapAbar(abar_phys: u64) !usize {
     const mapper = kernel.state.mem_manager.mapper orelse return error.MapperNotInitialized;
     const page_mask = kernel.mem.PAGE_MASK_4K;
     const physical_start = abar_phys & ~page_mask;
+
+    if (kernel.isMacbook41BootProfile()) {
+        const direct_virtual = kernel.state.mem_manager.memory_layout.kernel_offset |
+            physical_start;
+        if (mapper.translate(direct_virtual) != physical_start) {
+            return AhciError.InvalidAbar;
+        }
+        return @intCast(direct_virtual + (abar_phys & page_mask));
+    }
+
     if (mapper.translate(AHCI_MMIO_VIRTUAL_BASE) != null) {
         return AhciError.MmioVirtualRangeBusy;
     }
@@ -265,6 +275,8 @@ fn mapAbar(abar_phys: u64) !usize {
 
     // TODO: Replace this single fixed window with a shared MMIO virtual-range
     // allocator before supporting multiple HBAs and other MMIO drivers.
+    // TODO: Remove the MacBook4,1 pre-mapped ABAR path after dynamic MMIO
+    // mappings are validated under the retained bootstrap page map.
     // TODO: Configure PAT/MTRR policy for stronger uncacheable MMIO semantics.
 }
 

@@ -530,6 +530,10 @@ fn hasBootFlag(flag: []const u8) bool {
     return command_line.hasFlag(flag);
 }
 
+pub fn isMacbook41BootProfile() bool {
+    return config.macbook_early_fb and hasBootFlag("thad-macbook41");
+}
+
 fn getBootParam(name: []const u8, buffer: []u8) ?[]const u8 {
     var iterator = state.multiboot_info.getTagTypeIterator(.COMMAND_LINE);
     const header = iterator.next() orelse return null;
