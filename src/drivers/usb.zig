@@ -54,8 +54,17 @@ const HID_REQUEST_SET_PROTOCOL: u8 = 0x0B;
 
 const POLL_LIMIT: usize = 20_000_000;
 const MAX_CONFIGURATION_BYTES: usize = 256;
-const MAX_CONTROL_TDS: usize = 10;
+// A configuration descriptor may arrive through an 8-byte endpoint zero, so
+// reserve one TD per packet plus the SETUP and STATUS stages. The MacBook4,1
+// keyboard/trackpad advertises 84 bytes and already needs thirteen TDs.
+const MIN_ENDPOINT_ZERO_PACKET: usize = 8;
+const MAX_CONTROL_TDS: usize = 2 +
+    (MAX_CONFIGURATION_BYTES + MIN_ENDPOINT_ZERO_PACKET - 1) / MIN_ENDPOINT_ZERO_PACKET;
 const MAX_KEYBOARDS: usize = 8;
+
+// TODO: Allocate control-transfer TD chains to match each request rather than
+// retaining a worst-case static array once the USB core has an allocator-safe
+// DMA API.
 
 pub const UsbError = error{
     ControllerNotFound,
@@ -188,6 +197,8 @@ pub fn init() !void {
     // TODO: Add OHCI, EHCI companion routing, and xHCI host controllers.
     // TODO: Add external hubs and support multiple boot keyboards attached to
     // separate root ports of the same UHCI controller.
+    // TODO: Monitor root-port status changes, tear down disconnected devices,
+    // and re-enumerate hot-plugged keyboards without rebooting the kernel.
 }
 
 fn isUhciController(pci: PciAddress) bool {
