@@ -371,26 +371,26 @@ pub const exceptions = struct {
             : [result] "=r" (-> u64),
         );
 
-const present = (frame.error_code & 1) != 0;
-    const write = (frame.error_code & 2) != 0;
-    const user = (frame.error_code & 4) != 0;
+        const present = (frame.error_code & 1) != 0;
+        const write = (frame.error_code & 2) != 0;
+        const user = (frame.error_code & 4) != 0;
 
-    pf_log.err("=== PAGE FAULT DEBUG ===", .{});
-    pf_log.err("Fault address: 0x{X:0>16}", .{fault_addr});
-    pf_log.err("RIP: 0x{X:0>16}", .{frame.rip});
-    pf_log.err("RSP: 0x{X:0>16}", .{frame.rsp});
-    pf_log.err("Error Code: 0x{X:0>16}", .{frame.error_code});
-    pf_log.err("Type: {s} {s} {s}", .{
-        if (present) "protection violation" else "page not present",
-        if (write) "write" else "read",
-        if (user) "user" else "kernel",
-    });
+        pf_log.debug("=== PAGE FAULT TRACE ===", .{});
+        pf_log.debug("Fault address: 0x{X:0>16}", .{fault_addr});
+        pf_log.debug("RIP: 0x{X:0>16}", .{frame.rip});
+        pf_log.debug("RSP: 0x{X:0>16}", .{frame.rsp});
+        pf_log.debug("Error Code: 0x{X:0>16}", .{frame.error_code});
+        pf_log.debug("Type: {s} {s} {s}", .{
+            if (present) "protection violation" else "page not present",
+            if (write) "write" else "read",
+            if (user) "user" else "kernel",
+        });
 
-    // Print the instruction that caused the fault
-    if (frame.rip >= 0x0A000000 and frame.rip < 0x0B000000) {
-        const instr_ptr: *volatile u32 = @ptrFromInt(frame.rip);
-        pf_log.err("Instruction at fault RIP: 0x{X:0>8}", .{instr_ptr.*});
-    }
+        // Print the instruction that caused the fault
+        if (frame.rip >= 0x0A000000 and frame.rip < 0x0B000000) {
+            const instr_ptr: *volatile u32 = @ptrFromInt(frame.rip);
+            pf_log.debug("Instruction at fault RIP: 0x{X:0>8}", .{instr_ptr.*});
+        }
 
         if (!present) {
             // TODO @(dleiferives,d84fdf12-0708-41a7-98e1-f3d3c83ec957): update in
@@ -401,7 +401,7 @@ const present = (frame.error_code & 1) != 0;
                 if (t.creating_thread) {
                     mapper_ptr = t.creating_thread_mapper;
                 }
-                pf_log.err("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
+                pf_log.debug("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
                 var mapper = @constCast(mapper_ptr);
                 if (mapper.handleDemandPageFault(fault_addr)) |success| {
                     if (success) {
@@ -425,7 +425,7 @@ const present = (frame.error_code & 1) != 0;
                     irq_log.err("Error handling demand page fault: {}", .{err});
                 }
             } else if (kernel.state.mem_manager.mapper) |mapper_ptr| {
-                pf_log.err("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
+                pf_log.debug("Handling demand page fault at 0x{X:0>16}", .{fault_addr});
                 var mapper = @constCast(mapper_ptr);
                 if (mapper.handleDemandPageFault(fault_addr)) |success| {
                     if (success) {

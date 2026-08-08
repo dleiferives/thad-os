@@ -38,7 +38,11 @@ comptime {
     _ = snakes.PROC_create_kthread;
 }
 
-pub var log_level: std.log.Level = std.log.Level.err;
+/// Maximum verbosity emitted by the normal scoped logger. Error messages are
+/// always emitted even when their scope is disabled.
+pub var log_level: std.log.Level = .info;
+var configured_log_scopes: [256]u8 = undefined;
+var configured_log_scopes_len: usize = 0;
 
 /// The 64 bit kernel's entry point
 /// Really just calls panic if the true main loop fails!
@@ -101,6 +105,7 @@ pub fn main() !void {
     // Initilize the memory manager
     macbookEarlyLog("[memory] entering page-map rebuild...\n");
     try state.mem_manager_init();
+    configureLogging();
     initBootFramebuffer() catch |err| {
         log.warn("Framebuffer console unavailable: {}", .{err});
     };
@@ -561,6 +566,46 @@ fn getBootParam(name: []const u8, buffer: []u8) ?[]const u8 {
     return command_line.getParam(name, buffer);
 }
 
+fn configureLogging() void {
+    var level_buffer: [16]u8 = undefined;
+    if (getBootParam("thad-log-level", &level_buffer)) |level| {
+        if (std.mem.eql(u8, level, "error") or std.mem.eql(u8, level, "err")) {
+            log_level = .err;
+        } else if (std.mem.eql(u8, level, "warn")) {
+            log_level = .warn;
+        } else if (std.mem.eql(u8, level, "info")) {
+            log_level = .info;
+        } else if (std.mem.eql(u8, level, "debug")) {
+            log_level = .debug;
+        } else {
+            hardwareBootStatus("logging: unknown level '{s}'; using {s}", .{ level, logLevelText(log_level) });
+        }
+    }
+
+    var scopes_buffer: [configured_log_scopes.len]u8 = undefined;
+    if (getBootParam("thad-log-scopes", &scopes_buffer)) |scopes| {
+        @memcpy(configured_log_scopes[0..scopes.len], scopes);
+        configured_log_scopes_len = scopes.len;
+    }
+
+    hardwareBootStatus("logging: level={s}, scopes={s}", .{
+        logLevelText(log_level),
+        if (configured_log_scopes_len == 0)
+            "default"
+        else
+            configured_log_scopes[0..configured_log_scopes_len],
+    });
+}
+
+fn logLevelText(level: std.log.Level) []const u8 {
+    return switch (level) {
+        .err => "error",
+        .warn => "warn",
+        .info => "info",
+        .debug => "debug",
+    };
+}
+
 fn initBootFramebuffer() !void {
     if (hasBootFlag("thad-macbook41")) {
         // Debian's efifb DMI quirk confirms these values on this MacBook4,1.
@@ -849,6 +894,8 @@ fn persistentBootLogWrite(_: void, bytes: []const u8) error{}!usize {
         bytes[0..copy_length],
     );
     persistent_boot_log_len += copy_length;
+    // TODO: Reserve space for and append a single truncation marker so a full
+    // persistent buffer is distinguishable from a cleanly completed log.
     return bytes.len;
 }
 
@@ -945,8 +992,10 @@ pub fn print(comptime format: []const u8, args: anytype) void {
 }
 
 pub const LogScope = enum {
+    arch_cpu,
     drivers_vga,
     drivers_serial_log,
+    drivers_ahci,
     drivers_ps2,
     drivers_ps2_verbose,
     drivers_keyboard,
@@ -955,6 +1004,7 @@ pub const LogScope = enum {
     drivers_uart,
     drivers_ata,
     drivers_ata_verbose,
+    drivers_ata_hyper_verbose,
     arch_gdt,
     kernel,
     kernel_main,
@@ -977,8 +1027,10 @@ pub const LogScope = enum {
     irq_page_fault,
     irq,
     std_log_default_scope,
+    multiboot_module,
     simple_fs,
     kernel_vfs,
+    ext2,
     elf_loader,
     arcade,
 };
@@ -988,8 +1040,9 @@ pub const ALL_SCOPES = [_]LogScope{
     .arcade,
     .mapper_tests,
     .elf_loader,
-    // .simple_fs,
-    // .kernel_vfs,
+    .simple_fs,
+    .kernel_vfs,
+    .ext2,
     // .mem_page_bitfield_verbose,
     // .mem_page_bitfield,
     .mem,
@@ -1003,7 +1056,8 @@ pub const ALL_SCOPES = [_]LogScope{
     // .mem_allocator,
     // .mem_allocator_verbose,
     .irq,
-    .thread_yield,
+    // `.thread_yield` is deliberately opt-in: yielding can occur on every
+    // scheduler tick and would otherwise consume the persistent log in seconds.
     .irq_page_fault,
     // .drivers_vga,
     // .drivers_serial_log,
@@ -1011,6 +1065,7 @@ pub const ALL_SCOPES = [_]LogScope{
     // .drivers_ps2_verbose,
     // .drivers_keyboard,
     .drivers_ata,
+    .drivers_ahci,
     // .drivers_ata_verbose,
     // .drivers_ata_verbose,
     // .drivers_keyboard_verbose,
@@ -1023,6 +1078,54 @@ pub const ALL_SCOPES = [_]LogScope{
     .kernel_main,
     .std_log_default_scope,
 };
+
+fn logSectionForScope(comptime scope_name: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, scope_name, "drivers_ahci") or
+        std.mem.startsWith(u8, scope_name, "drivers_ata") or
+        std.mem.eql(u8, scope_name, "kernel_mbr")) return "storage";
+    if (std.mem.startsWith(u8, scope_name, "drivers_ps2") or
+        std.mem.startsWith(u8, scope_name, "drivers_keyboard")) return "input";
+    if (std.mem.eql(u8, scope_name, "drivers_vga") or
+        std.mem.eql(u8, scope_name, "drivers_serial_log") or
+        std.mem.startsWith(u8, scope_name, "drivers_uart")) return "console";
+    if (std.mem.startsWith(u8, scope_name, "mem")) return "memory";
+    if (std.mem.startsWith(u8, scope_name, "irq")) return "interrupts";
+    if (std.mem.eql(u8, scope_name, "simple_fs") or
+        std.mem.eql(u8, scope_name, "kernel_vfs") or
+        std.mem.eql(u8, scope_name, "ext2")) return "filesystem";
+    if (std.mem.eql(u8, scope_name, "kernel_thread") or
+        std.mem.eql(u8, scope_name, "thread_yield")) return "scheduler";
+    if (std.mem.eql(u8, scope_name, "elf_loader")) return "userspace";
+    if (std.mem.eql(u8, scope_name, "arcade")) return "arcade";
+    return "boot";
+}
+
+fn configuredScopeEnabled(comptime scope_name: []const u8) bool {
+    if (configured_log_scopes_len == 0) return true;
+    const configured = configured_log_scopes[0..configured_log_scopes_len];
+    const section = comptime logSectionForScope(scope_name);
+    var tokens = std.mem.tokenizeScalar(u8, configured, ',');
+    while (tokens.next()) |token| {
+        if (std.mem.eql(u8, token, "all") or
+            std.mem.eql(u8, token, section) or
+            std.mem.eql(u8, token, scope_name)) return true;
+    }
+    return false;
+}
+
+fn legacyScopeEnabled(comptime scope_name: []const u8) bool {
+    // Zig's unscoped std.log calls historically bypassed this project's scope
+    // allow-list. Keep that compatibility while the remaining call sites are
+    // migrated to named subsystem scopes.
+    if (std.mem.eql(u8, scope_name, "default")) return true;
+    if (allowed_scopes) |allowed| {
+        for (allowed) |allowed_scope| {
+            if (std.mem.eql(u8, scope_name, @tagName(allowed_scope))) return true;
+        }
+        return false;
+    }
+    return true;
+}
 
 pub const MAP_TEST_SCOPES = [_]LogScope{
     .mapper_tests,
@@ -1049,48 +1152,25 @@ pub fn logger(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (!std.mem.eql(u8, @tagName(scope), @tagName(.default))) {
-        if (allowed_scopes) |allowed| {
-            var found = false;
-            for (allowed) |allowed_scope| {
-                if (std.mem.eql(u8, @tagName(scope), @tagName(allowed_scope))) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                return;
-            }
-        }
+    const scope_name = @tagName(scope);
+    // Errors bypass scope filters so a narrowly configured diagnostic session
+    // cannot hide the failure that actually stopped the boot.
+    if (level != .err and
+        (!configuredScopeEnabled(scope_name) or !legacyScopeEnabled(scope_name)))
+    {
+        return;
     }
-    const prefix_scope = "[" ++ @tagName(scope) ++ "]: ";
+    if (@intFromEnum(level) > @intFromEnum(log_level) and level != .err) return;
+
+    const prefix_scope = "[" ++ scope_name ++ "]: ";
     const prefix_level = "[" ++ comptime level.asText() ++ "]: ";
     const prefix = if (scope == .default) prefix_level else prefix_scope;
-    switch (level) {
-        .debug => {
-            if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.debug)) {
-                print("{s}", .{prefix});
-                print(format ++ "\n", args);
-            }
-        },
-        .info => {
-            if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.info)) {
-                print("{s}", .{prefix});
-                print(format ++ "\n", args);
-            }
-        },
-        .warn => {
-            if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.warn)) {
-                print(format, args);
-            }
-        },
-        .err => {
-            if (@intFromEnum(log_level) <= @intFromEnum(std.log.Level.err)) {
-                print("{s}", .{prefix});
-                print(format ++ "\n", args);
-            }
-        },
-    }
+    print("{s}", .{prefix});
+    print(format ++ "\n", args);
+    if (level == .err and drivers.ahci.isReady()) flushPersistentBootLog() catch {};
+
+    // TODO: Add timestamps and CPU/thread identifiers once a monotonic clock
+    // and stable scheduler identities are available.
 }
 
 /// Allocate virtual memory with demand paging

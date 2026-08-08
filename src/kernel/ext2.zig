@@ -2,6 +2,7 @@ const std = @import("std");
 const drivers = @import("drivers");
 const block_device = drivers.block_device;
 const DataSlice = block_device.DataSlice;
+const log = std.log.scoped(.ext2);
 const kernel = @import("kernel.zig");
 const mbr = @import("mbr.zig");
 
@@ -581,7 +582,7 @@ pub const Ex2Filesystem = struct {
     /// Must be run after reading the superblock.
     /// must be deallocated after use
     fn readBlockGroups(self: *Self) !void {
-        std.log.info("reading block groups for device: {*}", .{self.dev});
+        log.info("reading block groups for device: {*}", .{self.dev});
         kernel.hardwareBootStatus("ext2: reading {} block groups at LBA {}", .{
             self.superblock.num_block_groups,
             self.partition_entry.lba_first_absolute,
@@ -659,11 +660,9 @@ pub const Ex2Filesystem = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.cache.deinit();
         if (self.block_groups.len != 0) self.allocator.free(self.block_groups);
         self.allocator.destroy(self);
-
-        // TODO: Give Cache an explicit deinit operation and release cached
-        // filesystem blocks here once cache ownership is fully defined.
     }
 
     pub inline fn getInodeBlockID(self: *Self, inode: inode_table_entry, block_index: u32) !u32 {
@@ -726,7 +725,7 @@ pub const Ex2Filesystem = struct {
             return error.InvalidFilesystem; // Not a directory
         }
         if (inode.size == 0) {
-            std.log.info("Directory is empty.", .{});
+            log.info("Directory is empty.", .{});
             return;
         }
         const num_blocks = (inode.blocks_count * 512) / self.superblock.block_size;
@@ -739,7 +738,7 @@ pub const Ex2Filesystem = struct {
             while (offset < block_slice.data.len) {
                 const entry = directory_entry.fromBytes(block_slice.data[offset..]);
                 if (entry.rec_len == 0) break; // No more entries in this block
-                std.log.info("{s}{s}{s}", .{ if (depth == 0) "" else depth_buff[0 .. depth * 3], if (depth == 0) "" else "- ", entry.getName() });
+                log.info("{s}{s}{s}", .{ if (depth == 0) "" else depth_buff[0 .. depth * 3], if (depth == 0) "" else "- ", entry.getName() });
                 if (entry.file_type == FileType.directory) cont_b: {
                     if (std.mem.eql(u8, "..", entry.getName())) break :cont_b;
                     if (std.mem.eql(u8, ".", entry.getName())) break :cont_b;
@@ -760,7 +759,7 @@ pub const Ex2Filesystem = struct {
         if (!root_inode.mode.directory) {
             return error.InvalidFilesystem; // Not a directory
         }
-        std.log.info("Root inode: {any}", .{root_inode});
+        log.info("Root inode: {any}", .{root_inode});
         try self.printDirectoryEntries(root_inode, 0);
     }
 };
@@ -775,7 +774,7 @@ pub fn printStruct(comptime T: type, value: T) void {
             inline for (structInfo.fields) |field| {
                 const field_name = field.name;
                 const field_value = @field(value, field_name);
-                std.log.info("{s}: {any}", .{ field_name, field_value });
+                log.info("{s}: {any}", .{ field_name, field_value });
             }
         },
         else => @compileError("Only structs are supported!"),
@@ -789,6 +788,49 @@ pub const Ext2FilesystemIterator = struct {
     partition_entry_iter: ?mbr.PartitionEntryIterator,
     partition_entry: ?mbr.partition_table_entry,
     allocator: std.mem.Allocator,
+
+    const RootLabelProbe = enum {
+        root,
+        other_ext2,
+        not_ext2,
+        unreadable,
+        unsupported_block_size,
+    };
+
+    fn probeRootLabel(dev: *block_device.BlockDev, ent: mbr.partition_table_entry) RootLabelProbe {
+        // Read the ext2 superblock without allocating a filesystem object. A
+        // physical disk commonly has EFI, Linux boot, and LVM partitions ahead
+        // of thad-os; probing those must not churn the early kernel heap.
+        if (dev.blk_size == 0 or dev.blk_size > 4096 or
+            !std.math.isPowerOfTwo(dev.blk_size))
+        {
+            return .unsupported_block_size;
+        }
+
+        var scratch: [4096]u8 = undefined;
+        const superblock_offset: usize = 1024;
+        const block_offset = superblock_offset % dev.blk_size;
+        const bytes_needed = block_offset + 1024;
+        const block_count = (bytes_needed + dev.blk_size - 1) / dev.blk_size;
+        const read_length = block_count * dev.blk_size;
+        if (read_length > scratch.len) return .unsupported_block_size;
+
+        const block_start = @as(u64, ent.lba_first_absolute) +
+            superblock_offset / dev.blk_size;
+        dev.readBlocks(block_start, block_count, scratch[0..read_length]) catch
+            return .unreadable;
+        const bytes = scratch[block_offset..][0..1024];
+
+        // Check magic before parsing computed fields: arbitrary non-ext2 bytes
+        // could otherwise produce invalid shifts or counts in fromBytes().
+        if (std.mem.bytesToValue(u16, bytes[56..58]) != EXT2_MAGIC) return .not_ext2;
+        const sb = superblock.fromBytes(bytes);
+        if (sb.hasVolumeName("thad-os") or sb.hasVolumeName("boot")) return .root;
+        return .other_ext2;
+
+        // TODO: Validate ext2 incompatibility flags here before constructing a
+        // writable/mountable filesystem object.
+    }
 
     pub fn init(allocator: std.mem.Allocator) !Ext2FilesystemIterator {
         var block_device_iter = block_device.getBlockDeviceIterator();
@@ -804,20 +846,39 @@ pub const Ext2FilesystemIterator = struct {
 
     pub fn next(self: *Ext2FilesystemIterator) ?*Ex2Filesystem {
         if (self.dev == null) {
-            std.log.info("No more block devices to check for ext2 filesystems.", .{});
+            log.info("No more block devices to check for ext2 filesystems.", .{});
             return null; // No more devices
         }
         if (self.partition_entry_iter == null) {
             // Initialize partition entry iterator for the current device
-            std.log.info("Initializing partition entry iterator for device: {any}", .{self.dev.?});
+            log.info("Initializing partition entry iterator for device: {any}", .{self.dev.?});
             kernel.hardwareBootStatus("ext2: opening partition table on {s}", .{self.dev.?.name});
             self.partition_entry_iter = mbr.PartitionEntryIterator.init(self.dev.?) orelse return null;
             kernel.hardwareBootStatus("ext2: partition table ready", .{});
         }
         if (self.partition_entry_iter.?.next()) |ent| {
             kernel.hardwareBootStatus("ext2: probing partition LBA {}", .{ent.lba_first_absolute});
+            switch (probeRootLabel(self.dev.?, ent)) {
+                .not_ext2 => {
+                    kernel.hardwareBootStatus("ext2: no superblock at LBA {}", .{ent.lba_first_absolute});
+                    return self.next();
+                },
+                .other_ext2 => {
+                    kernel.hardwareBootStatus("ext2: skipping non-root label at LBA {}", .{ent.lba_first_absolute});
+                    return self.next();
+                },
+                .unreadable => {
+                    kernel.hardwareBootStatus("ext2: could not read LBA {}", .{ent.lba_first_absolute});
+                    return self.next();
+                },
+                .unsupported_block_size => {
+                    kernel.hardwareBootStatus("ext2: unsupported block size {}", .{self.dev.?.blk_size});
+                    return self.next();
+                },
+                .root => kernel.hardwareBootStatus("ext2: root label found at LBA {}", .{ent.lba_first_absolute}),
+            }
             const fs_n = Ex2Filesystem.init(self.dev.?, ent, self.allocator) catch |err| {
-                std.log.err("Failed to initialize ext2 filesystem: {}", .{err});
+                log.err("Failed to initialize ext2 filesystem: {}", .{err});
                 kernel.hardwareBootStatus("ext2: partition LBA {} failed: {}", .{ ent.lba_first_absolute, err });
                 return self.next(); // Try the next partition
             };
@@ -829,23 +890,23 @@ pub const Ext2FilesystemIterator = struct {
                 if (!fs.superblock.hasVolumeName("thad-os") and
                     !fs.superblock.hasVolumeName("boot"))
                 {
-                    std.log.info("Skipping ext2 filesystem without a thad-os root label", .{});
+                    log.info("Skipping ext2 filesystem without a thad-os root label", .{});
                     kernel.hardwareBootStatus("ext2: skipping non-root label at LBA {}", .{ent.lba_first_absolute});
                     fs.deinit();
                     return self.next();
                 }
                 // Successfully created an ext2 filesystem
-                std.log.info("Found ext2 filesystem on device: {*}, partition: at {}", .{ self.dev.?, ent.lba_first_absolute });
+                log.info("Found ext2 filesystem on device: {*}, partition: at {}", .{ self.dev.?, ent.lba_first_absolute });
                 self.partition_entry = ent;
                 return fs; // Return the filesystem
             } else {
                 // Not a valid ext2 filesystem, continue to the next partition
-                std.log.info("Partition {any} on device {any} is not a valid ext2 filesystem.", .{ ent, self.dev.? });
+                log.info("Partition {any} on device {any} is not a valid ext2 filesystem.", .{ ent, self.dev.? });
                 return self.next();
             }
         } else {
             // No more partition entries, move to the next device
-            std.log.info("No more partition entries for device: {*}, moving to the next device.", .{self.dev.?});
+            log.info("No more partition entries for device: {*}, moving to the next device.", .{self.dev.?});
             self.dev = self.block_device_iter.next();
             self.partition_entry_iter = null;
             self.partition_entry = null;

@@ -2,7 +2,7 @@ const std = @import("std");
 const Mutex = @import("mutex.zig").Mutex;
 
 // Simple wrapper around the std.HashMap lol
-pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(val:*V) void) type {
+pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn (val: *V) void) type {
     return struct {
         const Node = struct {
             key: K,
@@ -13,7 +13,7 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
 
         const Self = @This();
         const HashMap = std.AutoHashMap(K, *Node);
-        const value_cleanup: ?*const fn(val:*V) void = if (V_cleanup) |f| f else null;
+        const value_cleanup: ?*const fn (val: *V) void = if (V_cleanup) |f| f else null;
 
         allocator: std.mem.Allocator,
         map: HashMap,
@@ -38,8 +38,8 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
             var current = self.head;
             while (current) |node| {
                 const next = node.next;
-                if (self.value_cleanup) |cleanup| {
-                    cleanup(node.value);
+                if (value_cleanup) |cleanup| {
+                    cleanup(&node.value);
                 }
                 self.allocator.destroy(node);
                 current = next;
@@ -64,7 +64,6 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
             return null;
         }
 
-
         /// Puts a key-value pair into the cache.
         pub fn put(self: *Self, key: K, value: V) !void {
             self.mutex.lock();
@@ -72,6 +71,7 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
 
             if (self.map.get(key)) |node| {
                 // Update existing
+                if (value_cleanup) |cleanup| cleanup(&node.value);
                 node.value = value;
                 self.moveToHead(node);
                 return;
@@ -79,6 +79,7 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
 
             // Create new node
             const node = try self.allocator.create(Node);
+            errdefer self.allocator.destroy(node);
             node.* = Node{ .key = key, .value = value };
 
             if (self.size >= self.capacity) {
@@ -86,6 +87,7 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
                 if (self.tail) |lru| {
                     _ = self.map.remove(lru.key);
                     self.removeNode(lru);
+                    if (value_cleanup) |cleanup| cleanup(&lru.value);
                     self.allocator.destroy(lru);
                     self.size -= 1;
                 }
@@ -104,11 +106,10 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
                 const node = entry.value;
                 const value = node.value;
                 self.removeNode(node);
-                if (self.value_cleanup) |cleanup| {
-                    cleanup(value);
-                }
                 self.allocator.destroy(node);
                 self.size -= 1;
+                // Ownership transfers to the caller; cleaning here would
+                // return a dangling value for owning cache element types.
                 return value;
             }
             return null;
@@ -121,8 +122,8 @@ pub fn Cache(comptime K: type, comptime V: type, comptime V_cleanup: ?*const fn(
             var current = self.head;
             while (current) |node| {
                 const next = node.next;
-                if (self.value_cleanup) |cleanup| {
-                    cleanup(node.value);
+                if (value_cleanup) |cleanup| {
+                    cleanup(&node.value);
                 }
                 self.allocator.destroy(node);
                 current = next;

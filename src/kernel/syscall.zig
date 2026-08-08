@@ -110,7 +110,7 @@ fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
                 thread.setCurrentThread(next_thread);
                 thread.loadContext(&next_thread.context);
             }
-            yield_log.err("Only one thread running, yielding does nothing", .{});
+            yield_log.debug("Only one thread running, yielding does nothing", .{});
             const next = scheduler.selectNext() orelse {
                 yield_log.err("No current thread to yield", .{});
                 return;
@@ -128,7 +128,7 @@ fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
             }
         }
     } else {
-        yield_log.err("No scheduler available, yielding does nothing", .{});
+        yield_log.warn("No scheduler available, yielding does nothing", .{});
     }
 }
 

@@ -9,6 +9,6 @@ menuentry "thad-os" {
     set gfxmode=1280x800x32,1024x768x32,auto
     set gfxpayload=keep
     search --no-floppy --label thad-os --set=thadroot
-    multiboot2 ($thadroot)/boot/kernel thad-macbook41 thad-keep-bootstrap-map thad-log0=253075498:2 thad-log1=253077506:30 thad-log2=253073762:32 thad-log3=253074498:64
+    multiboot2 ($thadroot)/boot/kernel thad-macbook41 thad-keep-bootstrap-map thad-log-level=info thad-log-scopes=boot,storage,filesystem,input,arcade thad-log0=253075498:2 thad-log1=253077506:30 thad-log2=253073762:32 thad-log3=253074498:64
     boot
 }

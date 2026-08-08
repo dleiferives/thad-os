@@ -5,6 +5,7 @@
 /os_image.img
 /zig-out/
 /.qemu-test/
+/.qemu-test.*/
 /zig.out
 /zig2.out
 /state
