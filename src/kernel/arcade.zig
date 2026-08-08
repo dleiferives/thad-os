@@ -74,12 +74,15 @@ fn runSnakes() void {
     log.info("Snakes started", .{});
 
     while (true) {
-        if (drivers.keyboard.KeyboardBuffer.getc() == Input.escape) {
+        if (drivers.keyboard.KeyboardBuffer.tryGetc() == Input.escape) {
             snakes.csnakes.kill_snake();
             while (snakes.csnakes.snakes_running() != 0) thread.Thread.yield();
             log.info("Snakes returned to menu", .{});
             return;
         }
+        // Snakes animate in cooperative worker threads, so the arcade thread
+        // must yield even while no key is pending.
+        thread.Thread.yield();
     }
 }
 
@@ -99,6 +102,7 @@ fn runPong() void {
     drawPongArena();
     drawPongState(left_x, left_y, right_x, right_y, ball_x, ball_y, player_score, computer_score);
     while (true) {
+        const previous_left_y = left_y;
         while (drivers.keyboard.KeyboardBuffer.tryGetc()) |key| {
             switch (key) {
                 Input.escape => {
@@ -111,7 +115,7 @@ fn runPong() void {
             }
         }
 
-        erasePongState(left_x, left_y, right_x, right_y, ball_x, ball_y);
+        erasePongState(left_x, previous_left_y, right_x, right_y, ball_x, ball_y);
         if (right_y + 1 < ball_y) right_y += 1 else if (right_y + 1 > ball_y) right_y -= 1;
         right_y = std.math.clamp(right_y, 3, 20);
 

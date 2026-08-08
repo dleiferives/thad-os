@@ -61,6 +61,10 @@ const MIN_ENDPOINT_ZERO_PACKET: usize = 8;
 const MAX_CONTROL_TDS: usize = 2 +
     (MAX_CONFIGURATION_BYTES + MIN_ENDPOINT_ZERO_PACKET - 1) / MIN_ENDPOINT_ZERO_PACKET;
 const MAX_KEYBOARDS: usize = 8;
+const FRAME_NUMBER_MASK: u16 = 0x07FF;
+const FRAME_NUMBER_HALF_RANGE: u16 = 0x0400;
+const KEY_REPEAT_INITIAL_DELAY_MS: u16 = 400;
+const KEY_REPEAT_INTERVAL_MS: u16 = 50;
 
 // TODO: Allocate control-transfer TD chains to match each request rather than
 // retaining a worst-case static array once the USB core has an allocator-safe
@@ -122,6 +126,9 @@ const KeyboardDevice = struct {
     data_toggle: bool = false,
     previous_report: [8]u8 = [_]u8{0} ** 8,
     caps_lock: bool = false,
+    repeat_usage: u8 = 0,
+    repeat_shift: bool = false,
+    repeat_deadline: u16 = 0,
 };
 
 const KeyboardRuntime = struct {
@@ -574,10 +581,14 @@ fn armInterruptTransfer(runtime: *KeyboardRuntime) !void {
 pub fn poll() void {
     for (keyboards[0..keyboard_count]) |*runtime| {
         const device = &runtime.device;
+        const frame_number = in16(device.controller, REG_FRNUM) & FRAME_NUMBER_MASK;
         const status = @as(*volatile u32, @ptrCast(&runtime.interrupt_td.status)).*;
-        if (status & TD_ACTIVE != 0) continue;
+        if (status & TD_ACTIVE != 0) {
+            emitKeyRepeat(device, frame_number);
+            continue;
+        }
         if (status & TD_ERROR_MASK == 0) {
-            processKeyboardReport(device, runtime.report);
+            processKeyboardReport(device, runtime.report, frame_number);
             device.data_toggle = !device.data_toggle;
         } else {
             log.warn("USB keyboard interrupt transfer status 0x{x}", .{status});
@@ -585,6 +596,7 @@ pub fn poll() void {
         armInterruptTransfer(runtime) catch |err| {
             log.err("Could not rearm USB keyboard transfer: {}", .{err});
         };
+        emitKeyRepeat(device, frame_number);
     }
 
     // TODO: Replace synchronous application-driven polling with UHCI IRQ
@@ -592,8 +604,11 @@ pub fn poll() void {
     // TODO: Recover stalled endpoints with CLEAR_FEATURE(ENDPOINT_HALT).
 }
 
-fn processKeyboardReport(device: *KeyboardDevice, report: [8]u8) void {
+fn processKeyboardReport(device: *KeyboardDevice, report: [8]u8, frame_number: u16) void {
     const shift = report[0] & ((1 << 1) | (1 << 5)) != 0;
+    if (device.repeat_usage != 0 and !containsUsage(report, device.repeat_usage)) {
+        device.repeat_usage = 0;
+    }
     for (report[2..8]) |usage| {
         if (usage == 0 or containsUsage(device.previous_report, usage)) continue;
         if (usage == 0x39) {
@@ -602,13 +617,41 @@ fn processKeyboardReport(device: *KeyboardDevice, report: [8]u8) void {
         }
         if (usageToInput(usage, shift, device.caps_lock)) |input| {
             keyboard.KeyboardBuffer.inject(input);
+            if (isRepeatableUsage(usage)) {
+                device.repeat_usage = usage;
+                device.repeat_shift = shift;
+                device.repeat_deadline = (frame_number +% KEY_REPEAT_INITIAL_DELAY_MS) &
+                    FRAME_NUMBER_MASK;
+            }
         }
     }
     device.previous_report = report;
 
-    // TODO: Add key-repeat timing and expose press/release plus modifier state
-    // as structured events instead of reducing all input to bytes.
+    // TODO: Move repeat policy into the input layer and expose press/release
+    // plus modifier state as structured events instead of reducing input to
+    // bytes inside the USB driver.
     // TODO: Parse general HID report descriptors for non-boot keyboards.
+}
+
+fn emitKeyRepeat(device: *KeyboardDevice, frame_number: u16) void {
+    if (device.repeat_usage == 0 or
+        !frameDeadlineReached(frame_number, device.repeat_deadline)) return;
+
+    if (usageToInput(device.repeat_usage, device.repeat_shift, device.caps_lock)) |input| {
+        keyboard.KeyboardBuffer.inject(input);
+    }
+    device.repeat_deadline = (frame_number +% KEY_REPEAT_INTERVAL_MS) & FRAME_NUMBER_MASK;
+}
+
+fn frameDeadlineReached(current: u16, deadline: u16) bool {
+    return ((current -% deadline) & FRAME_NUMBER_MASK) < FRAME_NUMBER_HALF_RANGE;
+}
+
+fn isRepeatableUsage(usage: u8) bool {
+    return (usage >= 0x04 and usage <= 0x27) or
+        usage == 0x2A or
+        (usage >= 0x2C and usage <= 0x38) or
+        (usage >= 0x4F and usage <= 0x52);
 }
 
 fn containsUsage(report: [8]u8, usage: u8) bool {
@@ -747,4 +790,7 @@ comptime {
     std.debug.assert(@sizeOf(SetupPacket) == 8);
     std.debug.assert(@sizeOf(TransferDescriptor) == 32);
     std.debug.assert(@sizeOf(QueueHead) == 8);
+    std.debug.assert(!frameDeadlineReached(99, 100));
+    std.debug.assert(frameDeadlineReached(100, 100));
+    std.debug.assert(frameDeadlineReached(10, 2040));
 }

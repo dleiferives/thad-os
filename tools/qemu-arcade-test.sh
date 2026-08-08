@@ -41,6 +41,9 @@ fi
     sleep 1
     printf 'sendkey ret\n'
     sleep 1
+    # Hold S long enough to cross the USB typematic delay and exercise repeats.
+    printf 'sendkey s 800\n'
+    sleep 1
     printf 'screendump /work/.qemu-test/arcade-pong.ppm\n'
     sleep 2
     printf 'sendkey esc\n'
