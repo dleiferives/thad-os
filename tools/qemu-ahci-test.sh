@@ -13,13 +13,17 @@ cp "$repo_dir/zig-out/bin/kernel" "$root_tree/boot/kernel"
 cp "$repo_dir/zig-out/bin/echo_program" "$root_tree/bin/program"
 cp "$repo_dir/tools/grub-ahci-test.cfg" "$root_tree/boot/grub/grub.cfg"
 
-# Mirror the intended Mac layout: GPT, then a labeled ext2 filesystem inside a
-# partition. The kernel must discover this through AHCI; it is not a boot module.
-truncate -s 128M "$test_dir/root-gpt.img"
+# Mirror the physical Mac's high-LBA root closely enough to catch accidental
+# 32-bit sector-to-byte arithmetic. The image is sparse, so its 128 GiB logical
+# size does not consume 128 GiB of host storage.
+root_lba=249665536
+root_offset=127828754432
+root_last_lba=249921535
+truncate -s 128G "$test_dir/root-gpt.img"
 parted -s "$test_dir/root-gpt.img" mklabel gpt
 parted -s "$test_dir/root-gpt.img" mkpart firmware fat32 2048s 4095s
-parted -s "$test_dir/root-gpt.img" mkpart thad-os ext2 4096s 260095s
-mke2fs -q -t ext2 -b 1024 -L thad-os -E offset=2097152 \
+parted -s "$test_dir/root-gpt.img" mkpart thad-os ext2 "${root_lba}s" "${root_last_lba}s"
+mke2fs -q -t ext2 -b 1024 -L thad-os -E offset="$root_offset" \
     -d "$root_tree" "$test_dir/root-gpt.img" 128000
 
 cp "$repo_dir/zig-out/bin/kernel" "$iso_tree/boot/kernel"
@@ -52,7 +56,7 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     exit "$status"
 fi
 grep -q "AHCI disk registered" "$serial_log"
-grep -q "partition: at 4096" "$serial_log"
+grep -q "partition: at $root_lba" "$serial_log"
 grep -q "found ext2 filesystem: thad-os" "$serial_log"
 grep -q "Mounting ext2 filesystem as VFS root" "$serial_log"
 grep -q "Successfully processed entire file" "$serial_log"

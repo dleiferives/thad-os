@@ -525,6 +525,24 @@ pub const Ex2Filesystem = struct {
 
     pub const Self = @This();
 
+    fn partitionByteStart(self: *const Self) !usize {
+        return std.math.mul(
+            usize,
+            @as(usize, self.partition_entry.lba_first_absolute),
+            @as(usize, self.dev.blk_size),
+        ) catch Ex2Error.InvalidArgument;
+    }
+
+    fn blockByteAddress(self: *const Self, block: u64) !usize {
+        const block_offset = std.math.mul(
+            usize,
+            std.math.cast(usize, block) orelse return Ex2Error.InvalidArgument,
+            @as(usize, self.superblock.block_size),
+        ) catch return Ex2Error.InvalidArgument;
+        return std.math.add(usize, self.first_block_addr, block_offset) catch
+            Ex2Error.InvalidArgument;
+    }
+
     /// Will return null if the filesystem is not a valid ext2 filesystem.
     pub fn init(
         dev: *block_device.BlockDev,
@@ -561,7 +579,7 @@ pub const Ex2Filesystem = struct {
     }
 
     fn readSuperblock(self: *Self) !bool {
-        const addr_start = self.partition_entry.lba_first_absolute * self.dev.blk_size;
+        const addr_start = try self.partitionByteStart();
         const offset = 1024; // superblock offset is 1024 bytes
         const size = 1024; // Superblock size is 1024 bytes
         kernel.hardwareBootStatus("ext2: reading superblock at LBA {}", .{self.partition_entry.lba_first_absolute});
@@ -577,8 +595,14 @@ pub const Ex2Filesystem = struct {
         }
 
         self.superblock = sb;
-        self.first_data_block_addr = (self.partition_entry.lba_first_absolute * self.dev.blk_size) + (self.superblock.block_size * self.superblock.first_data_block);
-        self.first_block_addr = self.partition_entry.lba_first_absolute * self.dev.blk_size;
+        const first_data_offset = std.math.mul(
+            usize,
+            @as(usize, self.superblock.block_size),
+            @as(usize, self.superblock.first_data_block),
+        ) catch return Ex2Error.InvalidArgument;
+        self.first_block_addr = addr_start;
+        self.first_data_block_addr = std.math.add(usize, addr_start, first_data_offset) catch
+            return Ex2Error.InvalidArgument;
         return true;
     }
 
@@ -590,7 +614,21 @@ pub const Ex2Filesystem = struct {
             self.superblock.num_block_groups,
             self.partition_entry.lba_first_absolute,
         });
-        var block_groups_slice = try self.dev.createDataSlice(self.allocator, self.first_data_block_addr + self.superblock.block_size, @intCast(self.superblock.num_block_groups * EXT2_BLOCK_GROUP_DESC_SIZE));
+        const descriptor_start = std.math.add(
+            usize,
+            self.first_data_block_addr,
+            @as(usize, self.superblock.block_size),
+        ) catch return Ex2Error.InvalidArgument;
+        const descriptor_bytes = std.math.mul(
+            usize,
+            @as(usize, self.superblock.num_block_groups),
+            EXT2_BLOCK_GROUP_DESC_SIZE,
+        ) catch return Ex2Error.InvalidArgument;
+        var block_groups_slice = try self.dev.createDataSlice(
+            self.allocator,
+            descriptor_start,
+            descriptor_bytes,
+        );
         defer block_groups_slice.free();
         self.block_groups = try self.allocator.alloc(block_group_desc, self.superblock.num_block_groups);
         for (0..self.superblock.num_block_groups) |i| {
@@ -608,7 +646,7 @@ pub const Ex2Filesystem = struct {
             // std.log.info("cache hit for block {d}", .{block});
             return slice;
         }
-        const block_addr = self.first_block_addr + (block * self.superblock.block_size);
+        const block_addr = try self.blockByteAddress(block);
         // std.log.info("getting block {d} at address {d}", .{block, block_addr});
         var block_slice = try self.dev.createDataSlice(self.allocator, block_addr, self.superblock.block_size);
         block_slice.cached = true;
@@ -619,13 +657,13 @@ pub const Ex2Filesystem = struct {
     }
 
     pub fn getBlockRaw(self: *Self, block: u64, data: []u8) !void {
-        const block_addr = self.first_block_addr + (block * self.superblock.block_size);
+        const block_addr = try self.blockByteAddress(block);
         const block_num = @as(u64, block_addr / self.dev.blk_size);
         try self.dev.readBlock(block_num, data);
     }
 
     pub fn getBlocksRaw(self: *Self, block: u64, count: u64, data: []u8) !void {
-        const block_addr = self.first_block_addr + (block * self.superblock.block_size);
+        const block_addr = try self.blockByteAddress(block);
         const block_num = @as(u64, block_addr / self.dev.blk_size);
         const byte_count = std.math.mul(u64, count, self.superblock.block_size) catch
             return error.InvalidArgument;
