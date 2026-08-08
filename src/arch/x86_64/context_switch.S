@@ -1,6 +1,7 @@
 # src/arch/x86_64/context_switch.S
 .global saveContext
 .global loadContext
+.global saveFpuState
 
 .section .text
 
@@ -124,3 +125,12 @@ loadContext:
 
     # Jump to new thread context
     iretq
+
+# void saveFpuState([512]u8* state)
+# The Zig type and its containing Thread are asserted to be 16-byte aligned.
+saveFpuState:
+    fxsave (%rdi)
+    retq
+
+# TODO: Detect and use XSAVE/XRSTOR with a CPUID-derived state size once the
+# scheduler supports CPUs and extensions beyond the legacy FXSAVE image.

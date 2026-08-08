@@ -64,21 +64,35 @@ pub const ThreadContext = extern struct {
     rip: u64,
     rflags: u64,
 
-    // FPU/SSE state pointer (allocated separately)
-    fpu_state: [512]u8,
+    // FXSAVE/FXRSTOR require a 16-byte-aligned 512-byte memory operand.
+    fpu_state: [512]u8 align(16),
 
     pub fn log(self: *@This()) void {
-        std.log.info("rax 0x{X:0>16}",.{self.rax});
-        std.log.info("rbx 0x{X:0>16}",.{self.rbx});
-        std.log.info("rcx 0x{X:0>16}",.{self.rcx});
-        std.log.info("rdx 0x{X:0>16}",.{self.rdx});
-        std.log.info("rsi 0x{X:0>16}",.{self.rsi});
-        std.log.info("rdi 0x{X:0>16}",.{self.rdi});
-        std.log.info("rbp 0x{X:0>16}",.{self.rbp});
-        std.log.info("rsp 0x{X:0>16}",.{self.rsp});
-        std.log.info("rip 0x{X:0>16}",.{self.rip});
+        std.log.info("rax 0x{X:0>16}", .{self.rax});
+        std.log.info("rbx 0x{X:0>16}", .{self.rbx});
+        std.log.info("rcx 0x{X:0>16}", .{self.rcx});
+        std.log.info("rdx 0x{X:0>16}", .{self.rdx});
+        std.log.info("rsi 0x{X:0>16}", .{self.rsi});
+        std.log.info("rdi 0x{X:0>16}", .{self.rdi});
+        std.log.info("rbp 0x{X:0>16}", .{self.rbp});
+        std.log.info("rsp 0x{X:0>16}", .{self.rsp});
+        std.log.info("rip 0x{X:0>16}", .{self.rip});
     }
 };
+
+comptime {
+    // Keep these offsets synchronized with context_switch.S.
+    std.debug.assert(@alignOf(ThreadContext) >= 16);
+    std.debug.assert(@offsetOf(ThreadContext, "rax") == 0);
+    std.debug.assert(@offsetOf(ThreadContext, "rdi") == 40);
+    std.debug.assert(@offsetOf(ThreadContext, "rsp") == 56);
+    std.debug.assert(@offsetOf(ThreadContext, "cs") == 128);
+    std.debug.assert(@offsetOf(ThreadContext, "ds") == 136);
+    std.debug.assert(@offsetOf(ThreadContext, "ss") == 168);
+    std.debug.assert(@offsetOf(ThreadContext, "rip") == 176);
+    std.debug.assert(@offsetOf(ThreadContext, "rflags") == 184);
+    std.debug.assert(@offsetOf(ThreadContext, "fpu_state") == 192);
+}
 
 pub const Thread = struct {
     tid: u64,
@@ -140,10 +154,10 @@ pub const Thread = struct {
         ready_list = null;
         zombie_list = null;
 
-        log.info("trying to create a cleanup Thread",.{});
+        log.info("trying to create a cleanup Thread", .{});
         // Create cleanup thread
         try createCleanupThread(allocator);
-        log.info("Created a cleanup Thread",.{});
+        log.info("Created a cleanup Thread", .{});
 
         initialized = true;
     }
@@ -164,7 +178,7 @@ pub const Thread = struct {
         // Find free slot
         const slot = if (is_main) 0 else findFreeSlot() orelse return ThreadError.ThreadTableFull;
 
-        log.info("creating a thread",.{});
+        log.info("creating a thread", .{});
         thread.* = Thread{
             .tid = if (is_main) 0 else getNextTid(),
             .state = .READY,
@@ -184,32 +198,33 @@ pub const Thread = struct {
             .entry_arg = arg,
             .fd_table = vfs.FdTable.init(allocator),
         };
+        std.debug.assert(@intFromPtr(&thread.context.fpu_state) & 0xF == 0);
+        saveFpuState(&thread.context.fpu_state);
 
         // Allocate kernel stack
         if (create_stack) {
             try allocateKernelStack(thread, slot);
-            log.info("allocated kernel stack",.{});
+            log.info("allocated kernel stack", .{});
         } else {
-            log.info("not allocating kernel stack",.{});
+            log.info("not allocating kernel stack", .{});
         }
         // note that we will be moving off the boot stack for the main thread
         // at this point!
 
-
         // Allocate user stack if needed
         if (!is_kernel) {
-            log.info("allocating user stack",.{});
+            log.info("allocating user stack", .{});
             try allocateUserStack(thread);
         }
 
         // Set up initial context
-        log.info("setting up context",.{});
-        if(!is_main){
+        log.info("setting up context", .{});
+        if (!is_main) {
             try setupInitialContext(thread);
         } else {
             try setupInitialContext(thread);
         }
-        log.info("setup context",.{});
+        log.info("setup context", .{});
 
         // Add to thread table
         thread_table[slot] = thread;
@@ -254,32 +269,32 @@ pub const Thread = struct {
         );
     }
 
-        pub fn putc(char: u8) void {
-            asm volatile ("int $128"
-                :
-                : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.PUTC))),
-                [arg1] "{rdi}" (char),
-                : "memory", "rax", "rdi"
-            );
-        }
+    pub fn putc(char: u8) void {
+        asm volatile ("int $128"
+            :
+            : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.PUTC))),
+              [arg1] "{rdi}" (char),
+            : "memory", "rax", "rdi"
+        );
+    }
 
-        pub fn getc() u8 {
-            return asm volatile ("int $128"
-                : [ret] "={rax}" (-> u8),
-                : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.GETC))),
-                : "memory", "rax"
-            );
-        }
+    pub fn getc() u8 {
+        return asm volatile ("int $128"
+            : [ret] "={rax}" (-> u8),
+            : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.GETC))),
+            : "memory", "rax"
+        );
+    }
 
     pub fn exec(path: []const u8) !void {
         return asm volatile ("int $128"
-        :
-        : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.EXEC))),
-          [path] "{rdi}" (path.ptr),
-          [args] "{rsi}" (@as(u64, 0)),
-                         : "memory", "rax", "rdi", "rsi"
-    );
-}
+            :
+            : [syscall] "{rax}" (@as(u64, @intFromEnum(syscall.SyscallNumber.EXEC))),
+              [path] "{rdi}" (path.ptr),
+              [args] "{rsi}" (@as(u64, 0)),
+            : "memory", "rax", "rdi", "rsi"
+        );
+    }
 
     pub fn blockOn(queue: *@import("thread_queue.zig").ThreadQueue, enable_interrupts: bool) void {
         if (getCurrentThread()) |current| {
@@ -347,7 +362,7 @@ fn allocateKernelStack(thread: *Thread, slot: usize) !void {
         (getKernelStackSize() * slot);
     const stack_size = getKernelStackSize();
 
-    log.info("Creating kernel stack",.{});
+    log.info("Creating kernel stack", .{});
     // Allocate virtual memory for kernel stack
     thread.mapper.mapRange(stack_start, stack_start + stack_size, mem.PageFlags{
         .present = true,
@@ -355,9 +370,11 @@ fn allocateKernelStack(thread: *Thread, slot: usize) !void {
         .user_accessible = false,
         .demand_alloc = false,
     }) catch |err| {
-        switch(err) {
+        switch (err) {
             error.AlreadyMapped => {},
-            else => {return err;}
+            else => {
+                return err;
+            },
         }
     };
 
@@ -391,11 +408,11 @@ fn allocateUserStack(thread: *Thread) !void {
 fn setupInitialContext(thread: *Thread) !void {
     // Set up stack pointers
     if (thread.is_kernel) {
-        log.info("context is kernel",.{});
+        log.info("context is kernel", .{});
         // Kernel thread setup
 
         const stack_top = @intFromPtr(thread.kernel_stack.ptr) + thread.kernel_stack.len;
-        if(stack_top <= 16) {
+        if (stack_top <= 16) {
             std.log.err("Kernel stack too small, must be at least 16 bytes is {}", .{stack_top});
             @panic("Kernel stack too small, must be at least 16 bytes");
         }
@@ -406,12 +423,11 @@ fn setupInitialContext(thread: *Thread) !void {
 
         // If this has an entry point, set up a wrapper
         if (thread.entry_point) |entry| {
-
-            log.info("setup entrypoint ",.{});
+            log.info("setup entrypoint ", .{});
             thread.context.rip = @intFromPtr(&kernelThreadWrapper);
             // Push entry point and args onto stack for wrapper
             thread.context.rdi = @intFromPtr(entry);
-            if(thread.entry_arg) |arg|{
+            if (thread.entry_arg) |arg| {
                 thread.context.rsi = @intFromPtr(arg);
             } else {
                 thread.context.rsi = 0;
@@ -425,9 +441,9 @@ fn setupInitialContext(thread: *Thread) !void {
             // thread.context.rsp -= 16; // Adjust for pushed values
         }
 
-        log.info("end kernel specific ",.{});
+        log.info("end kernel specific ", .{});
     } else {
-        log.info("context is user",.{});
+        log.info("context is user", .{});
         // User thread setup
         if (thread.user_stack) |stack| {
             const stack_top = @intFromPtr(stack.ptr) + stack.len;
@@ -448,7 +464,7 @@ fn setupInitialContext(thread: *Thread) !void {
         }
     }
 
-    log.info("rflags setting fpu",.{});
+    log.info("rflags setting fpu", .{});
     // Enable interrupts
     thread.context.rflags = 0x202; // IF flag set
 }
@@ -457,10 +473,14 @@ fn setupInitialContext(thread: *Thread) !void {
 pub fn kernelThreadWrapper() callconv(.C) noreturn {
     // Get entry point and args from stack
 
-    const entry_raw: u64= asm volatile ("mov %%rdi, %[rdi]" : [rdi] "={rax}" (-> u64));
-    const arg_raw: u64= asm volatile ("mov %%rsi, %[rsi]" : [rsi] "={rax}" (-> u64));
-    log.info("entry raw i 0x{X:0>16}",.{entry_raw});
-    log.info("arg raw i 0x{X:0>16}",.{arg_raw});
+    const entry_raw: u64 = asm volatile ("mov %%rdi, %[rdi]"
+        : [rdi] "={rax}" (-> u64),
+    );
+    const arg_raw: u64 = asm volatile ("mov %%rsi, %[rsi]"
+        : [rsi] "={rax}" (-> u64),
+    );
+    log.info("entry raw i 0x{X:0>16}", .{entry_raw});
+    log.info("arg raw i 0x{X:0>16}", .{arg_raw});
 
     const entry_fn: *const fn (*allowzero anyopaque) callconv(.C) i32 = @ptrFromInt(entry_raw);
     const arg: *allowzero anyopaque = @ptrFromInt(arg_raw);
@@ -472,10 +492,12 @@ pub fn kernelThreadWrapper() callconv(.C) noreturn {
 
 fn userThreadWrapper() callconv(.C) noreturn {
     // Similar to kernel wrapper but for user threads
-    const rsp = asm volatile ("mov %%rsp, %[rsp]" : [rsp] "=r" (-> u64));
+    const rsp = asm volatile ("mov %%rsp, %[rsp]"
+        : [rsp] "=r" (-> u64),
+    );
     const stack_ptr = @as([*]u64, @ptrFromInt(rsp));
 
-    const entry_fn = @as(*const fn(*anyopaque) callconv(.C) void, @ptrFromInt(stack_ptr[2]));
+    const entry_fn = @as(*const fn (*anyopaque) callconv(.C) void, @ptrFromInt(stack_ptr[2]));
     const arg = @as(*anyopaque, @ptrFromInt(stack_ptr[3]));
 
     // Call the actual thread function
@@ -485,7 +507,6 @@ fn userThreadWrapper() callconv(.C) noreturn {
     Thread.exit(0);
 }
 
-
 pub fn addToZombieList(thread: *Thread) void {
     thread.state = .ZOMBIE;
     thread.next = zombie_list;
@@ -493,16 +514,11 @@ pub fn addToZombieList(thread: *Thread) void {
 }
 
 pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFrame) void {
-    log.debug("Context switch: {any} -> {any}", .{
-        if (from) |f| f.tid else @as(u64, 0),
-        to.tid
-    });
+    log.debug("Context switch: {any} -> {any}", .{ if (from) |f| f.tid else @as(u64, 0), to.tid });
 
     // Save current context if there is one
     if (from) |old_thread| {
-        // Save current register state
-        old_thread.context = frame.toThreadContext();
-        // saveContext(&old_thread.context);
+        saveInterruptedContext(old_thread, frame);
     }
 
     // Switch to new thread's address space if different
@@ -518,20 +534,22 @@ pub fn switchContext(from: ?*Thread, to: *Thread, frame: *arch.irq.InterruptFram
     // arch.cpu.gdt.setKernelStack(@intFromPtr(to.kernel_stack.ptr) + to.kernel_stack.len);
 
     // Load new context and jump to thread
-    log.debug("switching context!",.{});
+    log.debug("switching context!", .{});
     to.context.log();
     loadContext(&to.context);
 }
-
-
-
-
 
 // TODO @(dleiferives,ad3ea549-b9cc-4c76-923c-3a555961263f): should put these
 // inside of arch ~#
 // Context switching assembly functions
 pub extern fn saveContext(ctx: *ThreadContext) void;
 pub extern fn loadContext(ctx: *ThreadContext) noreturn;
+pub extern fn saveFpuState(state: *[512]u8) void;
+
+pub fn saveInterruptedContext(target: *Thread, frame: *arch.irq.InterruptFrame) void {
+    saveFpuState(&target.context.fpu_state);
+    frame.writeThreadContext(&target.context);
+}
 
 // Cleanup thread
 fn createCleanupThread(allocator_owner: std.mem.Allocator) !void {
@@ -557,6 +575,8 @@ fn createCleanupThread(allocator_owner: std.mem.Allocator) !void {
         .next = null,
         .prev = null,
     };
+    std.debug.assert(@intFromPtr(&cleanup_thread.?.context.fpu_state) & 0xF == 0);
+    saveFpuState(&cleanup_thread.?.context.fpu_state);
 
     // Set up cleanup thread context
     cleanup_thread.?.context.rsp = @intFromPtr(&cleanup_stack) + cleanup_stack.len - 16;
@@ -627,7 +647,6 @@ pub fn setCurrentThread(t: *Thread) void {
 pub fn getCurrentThread() ?*Thread {
     return current_thread;
 }
-
 
 pub fn getThreadByTid(tid: u64) ?*Thread {
     for (thread_table) |entry| {

@@ -117,34 +117,33 @@ pub const InterruptFrame = extern struct {
     ss: u64,
 
     // helper
-    pub fn toThreadContext(self: @This()) thread.ThreadContext {
-        return .{
-            .rax = self.rax,
-            .rbx = self.rbx,
-            .rcx = self.rcx,
-            .rdx = self.rdx,
-            .rsi = self.rsi,
-            .rdi = self.rdi,
-            .rbp = self.rbp,
-            .rsp = self.rsp,
-            .r8 = self.r8,
-            .r9 = self.r9,
-            .r10 = self.r10,
-            .r11 = self.r11,
-            .r12 = self.r12,
-            .r13 = self.r13,
-            .r14 = self.r14,
-            .r15 = self.r15,
-            .cs = self.cs,
-            .ds = self.ds,
-            .es = self.es,
-            .fs = self.fs,
-            .gs = self.gs,
-            .ss = self.ss,
-            .rip = self.rip,
-            .rflags = self.rflags,
-            .fpu_state = undefined,
-        };
+    /// Copies the CPU state supplied by the interrupt stub without replacing
+    /// the separately captured, alignment-sensitive FXSAVE image.
+    pub fn writeThreadContext(self: @This(), context: *thread.ThreadContext) void {
+        context.rax = self.rax;
+        context.rbx = self.rbx;
+        context.rcx = self.rcx;
+        context.rdx = self.rdx;
+        context.rsi = self.rsi;
+        context.rdi = self.rdi;
+        context.rbp = self.rbp;
+        context.rsp = self.rsp;
+        context.r8 = self.r8;
+        context.r9 = self.r9;
+        context.r10 = self.r10;
+        context.r11 = self.r11;
+        context.r12 = self.r12;
+        context.r13 = self.r13;
+        context.r14 = self.r14;
+        context.r15 = self.r15;
+        context.cs = self.cs;
+        context.ds = self.ds;
+        context.es = self.es;
+        context.fs = self.fs;
+        context.gs = self.gs;
+        context.ss = self.ss;
+        context.rip = self.rip;
+        context.rflags = self.rflags;
     }
 };
 

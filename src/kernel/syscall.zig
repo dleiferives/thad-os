@@ -123,7 +123,7 @@ fn handleThreadYield(frame: *arch.irq.InterruptFrame) void {
                 scheduler.current_thread = next;
                 thread.switchContext(current_thread, next, frame);
             } else {
-                current_thread.context = frame.toThreadContext();
+                thread.saveInterruptedContext(current_thread, frame);
                 thread.loadContext(&current_thread.context);
             }
         }
