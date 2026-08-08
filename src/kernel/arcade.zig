@@ -16,6 +16,7 @@ const menu_items = [_][]const u8{
 
 pub fn run() noreturn {
     kernel.state.options.vga_printing = false;
+    drivers.vga.setColor(.LIGHT_GRAY, .BLACK);
     var selected: usize = 0;
     kernel.hardwareBootStatus("arcade: entering menu loop", .{});
 

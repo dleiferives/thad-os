@@ -655,7 +655,9 @@ fn bootStatus(comptime format: []const u8, args: anytype) void {
         flushPersistentBootLog() catch {};
     }
 
-    if (!drivers.vga.hasFramebuffer()) return;
+    // Full-screen clients such as the arcade own the framebuffer contents.
+    // Continue persisting checkpoints without scrolling through their UI.
+    if (!state.options.vga_printing or !drivers.vga.hasFramebuffer()) return;
     drivers.vga.setColor(.LIGHT_GRAY, .BLACK);
     drivers.vga.print("[boot] " ++ format ++ "\n", args) catch {};
 
