@@ -531,7 +531,9 @@ pub const Ex2Filesystem = struct {
         partition_entry: mbr.partition_table_entry,
         allocator: std.mem.Allocator,
     ) !?*Ex2Filesystem {
+        kernel.hardwareBootStatus("ext2: allocating filesystem state at LBA {}", .{partition_entry.lba_first_absolute});
         var self = try allocator.create(Ex2Filesystem);
+        kernel.hardwareBootStatus("ext2: filesystem state allocated at LBA {}", .{partition_entry.lba_first_absolute});
         self.* = Ex2Filesystem{
             .dev = dev,
             .superblock = undefined,
@@ -544,6 +546,7 @@ pub const Ex2Filesystem = struct {
             .first_block_addr = undefined,
             .cache = kernel.cache.Cache(u64, DataSlice, &DataSlice.destroy).init(allocator, 64),
         };
+        kernel.hardwareBootStatus("ext2: filesystem state initialized at LBA {}", .{partition_entry.lba_first_absolute});
         errdefer self.deinit();
 
         // Read the superblock

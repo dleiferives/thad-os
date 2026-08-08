@@ -866,7 +866,13 @@ pub const Kernel = struct {
         }, self.mem_manager.internal_allocator // For tracking contexts
         );
 
-        try self.kernel_heap.?.tester();
+        // Allocator self-tests deliberately allocate, free, and coalesce a
+        // series of heap blocks. Keep that mutation out of normal hardware
+        // boot; it is useful only in the dedicated allocator test profile.
+        if (self.testing.allocator) try self.kernel_heap.?.tester();
+
+        // TODO: Add a non-mutating heap integrity check that can run during a
+        // diagnostic hardware boot without changing allocator topology.
 
         self.kernel_allocator = try self.kernel_heap.?.createAllocator();
 
