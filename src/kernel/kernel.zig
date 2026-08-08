@@ -53,6 +53,20 @@ pub export fn kmain() callconv(.C) void {
 /// Sets up base drivers, memory management, then initiates threading.
 pub fn main() !void {
     allowed_scopes = ALL_SCOPES[0..];
+    // `state` lives in BSS as undefined because several required fields are
+    // populated during staged boot. Explicitly initialize every field that is
+    // read as state before its subsystem assigns the final value.
+    state.initilized = .{};
+    state.options = .{};
+    state.stdio_init = false;
+    state.keyboard_manager = null;
+    state.ps2_ctrl = null;
+    state.kernel_heap = null;
+    state.kernel_allocator = null;
+    state.scheduler = null;
+
+    // TODO: Give Kernel a complete initializer so adding a new state field
+    // cannot silently introduce another undefined early-boot read.
     // enable testing
     {
         state.testing.vga = config.test_vga;
