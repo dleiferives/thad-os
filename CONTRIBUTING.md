@@ -1,5 +1,22 @@
 # Contributing to thad-os
 
+## Hardware builds
+
+Build the MacBook4,1 kernel through the checked-in wrapper:
+
+```sh
+ZIG=/path/to/zig ./tools/build-macbook41.sh
+```
+
+Do not deploy a plain `zig build` result to that machine. The
+`macbook_early_fb` option currently selects the complete early hardware
+profile, including the bootstrap AHCI ABAR mapping as well as framebuffer
+markers.
+
+TODO: Replace the misleading compile-time `macbook_early_fb` switch with
+explicit named build artifacts for generic/QEMU and MacBook4,1 targets, then
+validate the selected artifact automatically during deployment.
+
 ## Tracking future work in code
 
 Use `TODO` comments as the project's lightweight, code-local backlog. When a
