@@ -474,7 +474,9 @@ pub fn mountExt2Root(
 ) !void {
     log.info("Mounting ext2 filesystem as root", .{});
 
+    kernel.hardwareBootStatus("VFS: reading ext2 root inode", .{});
     const root_inode = try ext2_fs.getInode(2); // Root inode
+    kernel.hardwareBootStatus("VFS: creating root node", .{});
     const root_node = try SimpleNode.createExt2Node(
         allocator,
         "/",
@@ -484,6 +486,7 @@ pub fn mountExt2Root(
     );
 
     try vfs.mount("/", &root_node.vfs_node, "ext2");
+    kernel.hardwareBootStatus("VFS: ext2 mount registered", .{});
     log.info("Ext2 root filesystem mounted successfully", .{});
 }
 

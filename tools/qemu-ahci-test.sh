@@ -17,9 +17,10 @@ cp "$repo_dir/tools/grub-ahci-test.cfg" "$root_tree/boot/grub/grub.cfg"
 # partition. The kernel must discover this through AHCI; it is not a boot module.
 truncate -s 128M "$test_dir/root-gpt.img"
 parted -s "$test_dir/root-gpt.img" mklabel gpt
-parted -s "$test_dir/root-gpt.img" mkpart thad-os ext2 2048s 260095s
-mke2fs -q -t ext2 -b 1024 -L thad-os -E offset=1048576 \
-    -d "$root_tree" "$test_dir/root-gpt.img" 129024
+parted -s "$test_dir/root-gpt.img" mkpart firmware fat32 2048s 4095s
+parted -s "$test_dir/root-gpt.img" mkpart thad-os ext2 4096s 260095s
+mke2fs -q -t ext2 -b 1024 -L thad-os -E offset=2097152 \
+    -d "$root_tree" "$test_dir/root-gpt.img" 128000
 
 cp "$repo_dir/zig-out/bin/kernel" "$iso_tree/boot/kernel"
 cp "$repo_dir/tools/grub-ahci-test.cfg" "$iso_tree/boot/grub/grub.cfg"
@@ -51,7 +52,7 @@ if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
     exit "$status"
 fi
 grep -q "AHCI disk registered" "$serial_log"
-grep -q "partition: at 2048" "$serial_log"
+grep -q "partition: at 4096" "$serial_log"
 grep -q "found ext2 filesystem: thad-os" "$serial_log"
 grep -q "Mounting ext2 filesystem as VFS root" "$serial_log"
 grep -q "Successfully processed entire file" "$serial_log"

@@ -445,7 +445,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
     // };
     mbr.logAllMBR() catch |err| {
         log.err("Failed to log MBR: {}", .{err});
-        @panic("Failed to log MBR");
+        bootStatus("partition diagnostics failed: {}; continuing", .{err});
     };
 
     log.info("starting to create filesystems", .{});
@@ -460,10 +460,12 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         log.err("Failed to initialize ext2 filesystem iterator: {}", .{err});
         @panic("Failed to initialize ext2 filesystem iterator");
     };
+    bootStatus("ext2 iterator ready", .{});
 
     var mounted_ext2 = false;
     const run_elf_boot_test = hasBootFlag("thad-test-elf");
     while (ext2_iter.next()) |fs| {
+        bootStatus("ext2 root found at LBA {}", .{fs.partition_entry.lba_first_absolute});
         log.info("found ext2 filesystem: {s}", .{fs.superblock.volume_name});
         log.info("There are {} blocks in this filesystem", .{fs.superblock.blocks_count});
         log.info("There are {} block groups in this filesystem", .{fs.block_groups.len});
@@ -471,11 +473,14 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
         // Mount the first ext2 filesystem as root
         if (!mounted_ext2) {
             log.info("Mounting ext2 filesystem as VFS root", .{});
+            bootStatus("mounting ext2 root", .{});
             simple_fs.mountExt2Root(state.getKernelAllocator() orelse @panic("no allocator"), fs) catch |err| {
                 log.err("Failed to mount ext2 as root: {}", .{err});
+                bootStatus("ext2 root mount failed: {}", .{err});
                 continue;
             };
             mounted_ext2 = true;
+            bootStatus("VFS root mounted", .{});
 
             if (run_elf_boot_test) {
                 log.info("Testing VFS operations", .{});
@@ -503,6 +508,7 @@ pub fn kernelThreadMain(arg: *allowzero anyopaque) callconv(.C) i32 {
 
     // If no ext2 found, create simple root
     if (!mounted_ext2) {
+        bootStatus("no labeled ext2 root found", .{});
         @panic("No ext2 filesystem found, cannot mount root");
     }
 

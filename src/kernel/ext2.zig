@@ -536,7 +536,9 @@ pub const Ex2Filesystem = struct {
             .superblock = undefined,
             .partition_entry = partition_entry,
             .allocator = allocator,
-            .block_groups = undefined,
+            // Invalid/non-ext2 partitions return before block-group metadata is
+            // allocated. Keep teardown safe while probing mixed GPT disks.
+            .block_groups = &.{},
             .first_data_block_addr = undefined,
             .first_block_addr = undefined,
             .cache = kernel.cache.Cache(u64, DataSlice, &DataSlice.destroy).init(allocator, 64),
@@ -558,13 +560,17 @@ pub const Ex2Filesystem = struct {
         const addr_start = self.partition_entry.lba_first_absolute * self.dev.blk_size;
         const offset = 1024; // superblock offset is 1024 bytes
         const size = 1024; // Superblock size is 1024 bytes
+        kernel.hardwareBootStatus("ext2: reading superblock at LBA {}", .{self.partition_entry.lba_first_absolute});
         var superblock_slice = try self.dev.createDataSlice(self.allocator, addr_start + offset, size); //addr_start + offset + size);
 
         defer superblock_slice.free();
         const sb = superblock.fromBytes(superblock_slice.data);
         // printStruct(drivers.block_device.DataSlice, superblock_slice);
         // printStruct(superblock, sb);
-        if (!sb.isValid()) return false;
+        if (!sb.isValid()) {
+            kernel.hardwareBootStatus("ext2: no superblock at LBA {}", .{self.partition_entry.lba_first_absolute});
+            return false;
+        }
 
         self.superblock = sb;
         self.first_data_block_addr = (self.partition_entry.lba_first_absolute * self.dev.blk_size) + (self.superblock.block_size * self.superblock.first_data_block);
@@ -576,6 +582,10 @@ pub const Ex2Filesystem = struct {
     /// must be deallocated after use
     fn readBlockGroups(self: *Self) !void {
         std.log.info("reading block groups for device: {*}", .{self.dev});
+        kernel.hardwareBootStatus("ext2: reading {} block groups at LBA {}", .{
+            self.superblock.num_block_groups,
+            self.partition_entry.lba_first_absolute,
+        });
         var block_groups_slice = try self.dev.createDataSlice(self.allocator, self.first_data_block_addr + self.superblock.block_size, @intCast(self.superblock.num_block_groups * EXT2_BLOCK_GROUP_DESC_SIZE));
         defer block_groups_slice.free();
         self.block_groups = try self.allocator.alloc(block_group_desc, self.superblock.num_block_groups);
@@ -583,6 +593,7 @@ pub const Ex2Filesystem = struct {
             self.block_groups[i] = block_group_desc.fromBytes(block_groups_slice.data[i * 32 .. (i + 1) * 32]);
             // printStruct(block_group_desc, self.block_groups[i]);
         }
+        kernel.hardwareBootStatus("ext2: block groups ready at LBA {}", .{self.partition_entry.lba_first_absolute});
     }
 
     /// Gets a block from the filesystem. fills the buffer with the block data.
@@ -648,8 +659,11 @@ pub const Ex2Filesystem = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.allocator.free(self.block_groups);
+        if (self.block_groups.len != 0) self.allocator.free(self.block_groups);
         self.allocator.destroy(self);
+
+        // TODO: Give Cache an explicit deinit operation and release cached
+        // filesystem blocks here once cache ownership is fully defined.
     }
 
     pub inline fn getInodeBlockID(self: *Self, inode: inode_table_entry, block_index: u32) !u32 {
@@ -796,14 +810,19 @@ pub const Ext2FilesystemIterator = struct {
         if (self.partition_entry_iter == null) {
             // Initialize partition entry iterator for the current device
             std.log.info("Initializing partition entry iterator for device: {any}", .{self.dev.?});
+            kernel.hardwareBootStatus("ext2: opening partition table on {s}", .{self.dev.?.name});
             self.partition_entry_iter = mbr.PartitionEntryIterator.init(self.dev.?) orelse return null;
+            kernel.hardwareBootStatus("ext2: partition table ready", .{});
         }
         if (self.partition_entry_iter.?.next()) |ent| {
+            kernel.hardwareBootStatus("ext2: probing partition LBA {}", .{ent.lba_first_absolute});
             const fs_n = Ex2Filesystem.init(self.dev.?, ent, self.allocator) catch |err| {
                 std.log.err("Failed to initialize ext2 filesystem: {}", .{err});
+                kernel.hardwareBootStatus("ext2: partition LBA {} failed: {}", .{ ent.lba_first_absolute, err });
                 return self.next(); // Try the next partition
             };
             if (fs_n) |fs| {
+                kernel.hardwareBootStatus("ext2: valid filesystem at LBA {}", .{ent.lba_first_absolute});
                 // Do not accidentally mount an unrelated ext2 filesystem (for
                 // example an old Linux /boot partition) as thad-os's root.
                 // "boot" keeps existing project disk images compatible.
@@ -811,6 +830,7 @@ pub const Ext2FilesystemIterator = struct {
                     !fs.superblock.hasVolumeName("boot"))
                 {
                     std.log.info("Skipping ext2 filesystem without a thad-os root label", .{});
+                    kernel.hardwareBootStatus("ext2: skipping non-root label at LBA {}", .{ent.lba_first_absolute});
                     fs.deinit();
                     return self.next();
                 }

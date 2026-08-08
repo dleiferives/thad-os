@@ -17,9 +17,11 @@ const menu_items = [_][]const u8{
 pub fn run() noreturn {
     kernel.state.options.vga_printing = false;
     var selected: usize = 0;
+    kernel.hardwareBootStatus("arcade: entering menu loop", .{});
 
     while (true) {
         drawMenu(selected);
+        kernel.hardwareBootStatus("arcade: menu ready", .{});
         const key = drivers.keyboard.KeyboardBuffer.getc();
         switch (key) {
             'w', 'W', Input.arrow_up => selected = if (selected == 0) menu_items.len - 1 else selected - 1,
@@ -58,6 +60,9 @@ fn drawMenu(selected: usize) void {
     drawText(21, 17, "+--------------------------------------+");
     drawCentered(20, "Use arrows or W/S, then Enter", Color.LIGHT_GREEN, Color.BLACK);
     drawCentered(22, "Escape always returns to this menu", Color.DARK_GRAY, Color.BLACK);
+    if (kernel.isMacbook41BootProfile() and kernel.state.keyboard_manager == null) {
+        drawCentered(23, "USB keyboard support pending", Color.YELLOW, Color.BLACK);
+    }
     log.info("Arcade menu ready (selection {})", .{selected});
 }
 
