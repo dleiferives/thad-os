@@ -6,4 +6,5 @@ pub const uart = @import("uart.zig");
 pub const block_device = @import("block_device.zig");
 pub const ata = @import("ata.zig");
 pub const ahci = @import("ahci.zig");
+pub const usb = @import("usb.zig");
 pub const multiboot_module = @import("multiboot_module.zig");

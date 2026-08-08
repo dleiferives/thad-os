@@ -791,6 +791,14 @@ pub const KeyboardBuffer = struct {
         arch.irq.irq.disable();
 
         while (self.read_pos == self.write_pos) {
+            if (input_poll_hook) |poll| {
+                arch.irq.irq.enable();
+                poll();
+                arch.irq.irq.disable();
+                if (self.read_pos != self.write_pos) break;
+                asm volatile ("pause");
+                continue;
+            }
             if (thread.getCurrentThread()) |current| {
                 current.state = .BLOCKED_KEYBOARD;
                 self.blocked_readers.enqueue(current);
@@ -817,6 +825,7 @@ pub const KeyboardBuffer = struct {
     }
 
     pub fn getCharNonBlocking(self: *KeyboardBuffer) ?u8 {
+        if (input_poll_hook) |poll| poll();
         arch.irq.irq.disable();
         defer arch.irq.irq.enable();
 
@@ -851,6 +860,16 @@ pub const KeyboardBuffer = struct {
         return keyboard_buffer.getCharNonBlocking();
     }
 
+    /// Adds a character or navigation code produced by a non-PS/2 input
+    /// backend such as USB HID.
+    pub fn inject(ch: u8) void {
+        keyboard_buffer.putChar(ch);
+    }
+
+    pub fn registerPollHook(poll: *const fn () void) void {
+        input_poll_hook = poll;
+    }
+
     pub fn setup_irq(ctrl: *Ps2Controller, mgr: *KeyboardManager) !void {
         arch.irq.irq.disable();
         ps2_ctrl = ctrl;
@@ -862,3 +881,7 @@ pub const KeyboardBuffer = struct {
 };
 
 var keyboard_buffer: KeyboardBuffer = .{};
+var input_poll_hook: ?*const fn () void = null;
+
+// TODO: Replace the single polling hook with an input-device registry so
+// multiple keyboards and interrupt-driven producers can coexist cleanly.

@@ -141,12 +141,10 @@ pub fn main() !void {
     state.keyboard_manager = null;
     var ps2_ctrl_storage: drivers.ps2.Ps2Controller = undefined;
     var kbd_manager_storage: drivers.keyboard.KeyboardManager = undefined;
-    if (hasBootFlag("thad-macbook41")) {
+    if (hasBootFlag("thad-macbook41") or hasBootFlag("thad-usb-input-only")) {
         // MacBook4,1 exposes its built-in keyboard and trackpad as USB devices;
         // touching an absent/firmware-emulated i8042 controller can stall boot.
         bootStatus("PS/2 skipped; USB input required", .{});
-        // TODO: Add UHCI/EHCI enumeration and a USB HID boot-keyboard backend,
-        // then feed its key events into KeyboardBuffer.
         // TODO: Parse the ACPI FADT i8042 boot-architecture flag instead of
         // relying on a machine-specific kernel command-line flag.
     } else if (drivers.ps2.Ps2Controller.init()) |controller| {
@@ -173,6 +171,17 @@ pub fn main() !void {
     } else |err| {
         log.warn("PS/2 controller unavailable: {}", .{err});
         bootStatus("PS/2 unavailable; continuing", .{});
+    }
+
+    if (isMacbook41BootProfile() or hasBootFlag("thad-usb-input") or
+        hasBootFlag("thad-usb-input-only"))
+    {
+        bootStatus("probing USB HID input", .{});
+        drivers.usb.init() catch |err| {
+            log.warn("USB input unavailable: {}", .{err});
+            bootStatus("USB input unavailable: {}; continuing", .{err});
+        };
+        bootStatus("USB HID probe finished", .{});
     }
 
     if (state.options.polling_keyboard and state.keyboard_manager != null) {
@@ -1002,6 +1011,7 @@ pub const LogScope = enum {
     drivers_vga,
     drivers_serial_log,
     drivers_ahci,
+    drivers_usb,
     drivers_ps2,
     drivers_ps2_verbose,
     drivers_keyboard,
@@ -1072,6 +1082,7 @@ pub const ALL_SCOPES = [_]LogScope{
     // .drivers_keyboard,
     .drivers_ata,
     .drivers_ahci,
+    .drivers_usb,
     // .drivers_ata_verbose,
     // .drivers_ata_verbose,
     // .drivers_keyboard_verbose,
@@ -1090,7 +1101,8 @@ fn logSectionForScope(comptime scope_name: []const u8) []const u8 {
         std.mem.startsWith(u8, scope_name, "drivers_ata") or
         std.mem.eql(u8, scope_name, "kernel_mbr")) return "storage";
     if (std.mem.startsWith(u8, scope_name, "drivers_ps2") or
-        std.mem.startsWith(u8, scope_name, "drivers_keyboard")) return "input";
+        std.mem.startsWith(u8, scope_name, "drivers_keyboard") or
+        std.mem.startsWith(u8, scope_name, "drivers_usb")) return "input";
     if (std.mem.eql(u8, scope_name, "drivers_vga") or
         std.mem.eql(u8, scope_name, "drivers_serial_log") or
         std.mem.startsWith(u8, scope_name, "drivers_uart")) return "console";

@@ -31,8 +31,8 @@ else
     ovmf_code=/usr/share/OVMF/OVMF_CODE.fd
 fi
 
-# Drive every entry using QEMU's PS/2 keyboard. Each game must acknowledge
-# Escape and redraw the menu before the next selection is sent.
+# Drive every entry through QEMU's UHCI USB keyboard. Each game must
+# acknowledge Escape and redraw the menu before the next selection is sent.
 (
     sleep 25
     printf 'screendump /work/.qemu-test/arcade-menu.ppm\n'
@@ -69,6 +69,8 @@ fi
     -cdrom "$test_dir/thad-arcade-test.iso" \
     -drive id=thaddisk,file="$test_dir/root-gpt.img",format=raw,if=none \
     -device ide-hd,drive=thaddisk \
+    -usb \
+    -device usb-kbd \
     -display none \
     -serial "file:$serial_log" \
     -monitor stdio \
@@ -76,6 +78,7 @@ fi
 
 cat "$serial_log"
 grep -q "Framebuffer console initialized" "$serial_log"
+grep -q "UHCI HID boot keyboard ready" "$serial_log"
 grep -q "Arcade menu ready" "$serial_log"
 grep -q "Pong started" "$serial_log"
 grep -q "Pong returned to menu" "$serial_log"
