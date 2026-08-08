@@ -55,6 +55,7 @@ const HID_REQUEST_SET_PROTOCOL: u8 = 0x0B;
 const POLL_LIMIT: usize = 20_000_000;
 const MAX_CONFIGURATION_BYTES: usize = 256;
 const MAX_CONTROL_TDS: usize = 10;
+const MAX_KEYBOARDS: usize = 8;
 
 pub const UsbError = error{
     ControllerNotFound,
@@ -68,6 +69,7 @@ pub const UsbError = error{
     TransferFailed,
     InvalidDescriptor,
     ConfigurationTooLarge,
+    TooManyKeyboards,
 };
 
 const PciAddress = struct {
@@ -113,16 +115,25 @@ const KeyboardDevice = struct {
     caps_lock: bool = false,
 };
 
+const KeyboardRuntime = struct {
+    frame_list: [1024]u32 align(4096),
+    queue_head: QueueHead align(16),
+    interrupt_td: TransferDescriptor align(16),
+    report: [8]u8 align(16),
+    device: KeyboardDevice,
+};
+
 var frame_list: [1024]u32 align(4096) = undefined;
 var queue_head: QueueHead align(16) = undefined;
 var transfer_descriptors: [MAX_CONTROL_TDS]TransferDescriptor align(16) = undefined;
 var setup_packet: SetupPacket align(16) = undefined;
 var control_data: [MAX_CONFIGURATION_BYTES]u8 align(16) = undefined;
-var interrupt_report: [8]u8 align(16) = undefined;
-var active_keyboard: ?KeyboardDevice = null;
+var keyboards: [MAX_KEYBOARDS]KeyboardRuntime align(4096) = undefined;
+var keyboard_count: usize = 0;
 
 pub fn init() !void {
     kernel.hardwareBootStatus("USB: scanning for UHCI controllers", .{});
+    keyboard_count = 0;
     var bus: u16 = 0;
     var found_controller = false;
     while (bus < 256) : (bus += 1) {
@@ -150,12 +161,14 @@ pub fn init() !void {
                     log.warn("UHCI controller initialization failed: {}", .{err});
                     continue;
                 };
-                if (enumerateController(candidate)) |keyboard_found| {
-                    if (keyboard_found) {
-                        keyboard.KeyboardBuffer.registerPollHook(poll);
-                        log.info("UHCI HID boot keyboard ready", .{});
-                        kernel.hardwareBootStatus("USB: HID boot keyboard ready", .{});
-                        return;
+                if (enumerateController(candidate)) |keyboard_device| {
+                    if (keyboard_device) |device_found| {
+                        activateKeyboard(device_found) catch |err| {
+                            log.warn("Could not activate UHCI keyboard: {}", .{err});
+                            stopController(candidate);
+                            continue;
+                        };
+                        continue;
                     }
                     stopController(candidate);
                 } else |err| {
@@ -166,12 +179,15 @@ pub fn init() !void {
         }
     }
     if (!found_controller) return UsbError.ControllerNotFound;
-    return UsbError.KeyboardNotFound;
+    if (keyboard_count == 0) return UsbError.KeyboardNotFound;
+    keyboard.KeyboardBuffer.registerPollHook(poll);
+    log.info("{} UHCI HID boot keyboard(s) ready", .{keyboard_count});
+    kernel.hardwareBootStatus("USB: {} HID boot keyboard(s) ready", .{keyboard_count});
 
     // TODO: Move PCI discovery into a shared enumerator used by AHCI and USB.
     // TODO: Add OHCI, EHCI companion routing, and xHCI host controllers.
-    // TODO: Add external hubs and enumerate every device instead of stopping
-    // after the first usable boot keyboard.
+    // TODO: Add external hubs and support multiple boot keyboards attached to
+    // separate root ports of the same UHCI controller.
 }
 
 fn isUhciController(pci: PciAddress) bool {
@@ -222,7 +238,7 @@ fn initializeController(controller: Controller) !void {
     // standardized PCI legacy-support capability where firmware enables it.
 }
 
-fn enumerateController(controller: Controller) !bool {
+fn enumerateController(controller: Controller) !?KeyboardDevice {
     var port_index: u8 = 0;
     var next_address: u7 = 1;
     while (port_index < 2) : (port_index += 1) {
@@ -239,16 +255,14 @@ fn enumerateController(controller: Controller) !bool {
             continue;
         };
         if (enumerateDevice(controller, next_address, low_speed)) |keyboard_device| {
-            active_keyboard = keyboard_device;
-            armInterruptTransfer();
-            return true;
+            return keyboard_device;
         } else |err| {
             log.warn("USB device on port {} was not a boot keyboard: {}", .{ port_index + 1, err });
         }
         next_address +%= 1;
         if (next_address == 0) next_address = 1;
     }
-    return false;
+    return null;
 }
 
 fn enumerateDevice(controller: Controller, address: u7, low_speed: bool) !KeyboardDevice {
@@ -443,7 +457,27 @@ fn setTd(
     buffer_phys: u32,
     low_speed: bool,
 ) void {
-    transfer_descriptors[index] = .{
+    transfer_descriptors[index] = makeTd(
+        pid,
+        address,
+        endpoint,
+        toggle,
+        length,
+        buffer_phys,
+        low_speed,
+    );
+}
+
+fn makeTd(
+    pid: u8,
+    address: u7,
+    endpoint: u4,
+    toggle: bool,
+    length: usize,
+    buffer_phys: u32,
+    low_speed: bool,
+) TransferDescriptor {
+    return .{
         .link = LINK_TERMINATE,
         .status = TD_ACTIVE | TD_ERROR_COUNT_3 | (if (low_speed) TD_LOW_SPEED else 0),
         .token = token(pid, address, endpoint, toggle, length),
@@ -477,33 +511,70 @@ fn executeSchedule(controller: Controller, count: usize) !void {
     }
 }
 
-fn armInterruptTransfer() void {
-    const device = &(active_keyboard orelse return);
-    @memset(&interrupt_report, 0);
-    setTd(
-        0,
+fn activateKeyboard(device: KeyboardDevice) !void {
+    if (keyboard_count >= keyboards.len) return UsbError.TooManyKeyboards;
+    const runtime = &keyboards[keyboard_count];
+    runtime.device = device;
+    @memset(&runtime.frame_list, LINK_TERMINATE);
+    @memset(&runtime.report, 0);
+    runtime.queue_head = .{ .horizontal = LINK_TERMINATE, .element = LINK_TERMINATE };
+    const queue_head_phys = try physicalAddress(&runtime.queue_head);
+    for (&runtime.frame_list) |*entry| entry.* = queue_head_phys | LINK_QUEUE_HEAD;
+    try armInterruptTransfer(runtime);
+
+    // The enumeration schedule is shared because control requests are issued
+    // serially. Give each discovered keyboard its own permanent schedule before
+    // scanning the next UHCI controller.
+    stopController(device.controller);
+    out16(device.controller, REG_USBINTR, 0);
+    out16(device.controller, REG_USBSTS, 0xFFFF);
+    out16(device.controller, REG_FRNUM, 0);
+    out32(device.controller, REG_FRBASEADD, try physicalAddress(&runtime.frame_list));
+    out16(device.controller, REG_USBCMD, CMD_MAX_PACKET_64 | CMD_CONFIGURE | CMD_RUN);
+    try waitFrames(device.controller, 2);
+
+    keyboard_count += 1;
+    kernel.hardwareBootStatus(
+        "USB: keyboard active on {x:0>2}:{x:0>2}.{} endpoint 0x{x}",
+        .{
+            device.controller.pci.bus,
+            device.controller.pci.device,
+            device.controller.pci.function,
+            @as(u8, device.endpoint) | 0x80,
+        },
+    );
+}
+
+fn armInterruptTransfer(runtime: *KeyboardRuntime) !void {
+    const device = &runtime.device;
+    @memset(&runtime.report, 0);
+    runtime.interrupt_td = makeTd(
         PID_IN,
         device.address,
         device.endpoint,
         device.data_toggle,
-        @min(@as(usize, device.max_packet), interrupt_report.len),
-        physicalAddress(&interrupt_report) catch return,
+        @min(@as(usize, device.max_packet), runtime.report.len),
+        try physicalAddress(&runtime.report),
         device.low_speed,
     );
-    queue_head.element = physicalAddress(&transfer_descriptors[0]) catch return;
+    runtime.queue_head.element = try physicalAddress(&runtime.interrupt_td);
 }
 
 pub fn poll() void {
-    const device = &(active_keyboard orelse return);
-    const status = @as(*volatile u32, @ptrCast(&transfer_descriptors[0].status)).*;
-    if (status & TD_ACTIVE != 0) return;
-    if (status & TD_ERROR_MASK == 0) {
-        processKeyboardReport(device, interrupt_report);
-        device.data_toggle = !device.data_toggle;
-    } else {
-        log.warn("USB keyboard interrupt transfer status 0x{x}", .{status});
+    for (keyboards[0..keyboard_count]) |*runtime| {
+        const device = &runtime.device;
+        const status = @as(*volatile u32, @ptrCast(&runtime.interrupt_td.status)).*;
+        if (status & TD_ACTIVE != 0) continue;
+        if (status & TD_ERROR_MASK == 0) {
+            processKeyboardReport(device, runtime.report);
+            device.data_toggle = !device.data_toggle;
+        } else {
+            log.warn("USB keyboard interrupt transfer status 0x{x}", .{status});
+        }
+        armInterruptTransfer(runtime) catch |err| {
+            log.err("Could not rearm USB keyboard transfer: {}", .{err});
+        };
     }
-    armInterruptTransfer();
 
     // TODO: Replace synchronous application-driven polling with UHCI IRQ
     // completion handling and schedule the endpoint at bInterval cadence.

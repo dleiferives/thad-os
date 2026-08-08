@@ -71,6 +71,8 @@ fi
     -device ide-hd,drive=thaddisk \
     -usb \
     -device usb-kbd \
+    -device piix3-usb-uhci,id=extra-uhci \
+    -device usb-kbd,bus=extra-uhci.0 \
     -display none \
     -serial "file:$serial_log" \
     -monitor stdio \
@@ -78,7 +80,7 @@ fi
 
 cat "$serial_log"
 grep -q "Framebuffer console initialized" "$serial_log"
-grep -q "UHCI HID boot keyboard ready" "$serial_log"
+grep -q "2 UHCI HID boot keyboard(s) ready" "$serial_log"
 grep -q "Arcade menu ready" "$serial_log"
 grep -q "Pong started" "$serial_log"
 grep -q "Pong returned to menu" "$serial_log"
